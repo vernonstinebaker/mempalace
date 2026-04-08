@@ -75,7 +75,11 @@ pub fn import_sessions(
             slugify(&session.title)
         };
 
-        match db.add_drawer(
+        // Use session_id as stable drawer ID (not content hash) so that re-indexing
+        // the same session after it has grown doesn't create a duplicate drawer.
+        let drawer_id = format!("oc_session_{}", &session.id);
+        match db.upsert_drawer(
+            &drawer_id,
             "opencode",
             &room,
             &content,

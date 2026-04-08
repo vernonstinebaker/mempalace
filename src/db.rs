@@ -822,6 +822,58 @@ impl Database {
         }))
     }
 
+    // ── upsert_drawer (for importers) ─────────────────────────────────────────
+
+    /// Insert or replace a drawer with a caller-supplied stable ID.
+    /// Used by importers (e.g. index-sessions) that want a stable key independent
+    /// of content, so re-indexing updated content doesn't create duplicate drawers.
+    pub fn upsert_drawer(
+        &self,
+        id: &str,
+        wing: &str,
+        room: &str,
+        content: &str,
+        source_file: Option<&str>,
+        added_by: &str,
+        embedder: Option<&Embedder>,
+    ) -> Result<()> {
+        // Get old rowid if exists (to clean up vec_drawers before replace)
+        let old_rowid: Option<i64> = self
+            .conn
+            .query_row(
+                "SELECT rowid FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .optional()?;
+
+        if let Some(old) = old_rowid {
+            let _ = self
+                .conn
+                .execute("DELETE FROM vec_drawers WHERE rowid = ?1", params![old]);
+            let _ = self
+                .conn
+                .execute("DELETE FROM vec_embedded WHERE rowid = ?1", params![old]);
+        }
+
+        self.conn.execute(
+            "INSERT OR REPLACE INTO drawers (id, wing, room, content, source_file, added_by, filed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+            params![id, wing, room, content, source_file, added_by],
+        )?;
+
+        let rowid = self.conn.last_insert_rowid();
+        if let Some(emb) = embedder {
+            if let Some(vec_bytes) = emb.embed(content) {
+                if self.add_embedding(rowid, &vec_bytes).is_ok() {
+                    self.mark_embedded(rowid);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     // ── add_drawer ────────────────────────────────────────────────────────────
 
     pub fn add_drawer(
