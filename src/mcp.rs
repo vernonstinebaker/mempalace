@@ -60,6 +60,8 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_check_duplicate","description":"Check if content already exists in the palace before filing","inputSchema":{"type":"object","properties":{"content":{"type":"string","description":"Content to check"},"threshold":{"type":"number","description":"Similarity threshold 0-1 (default 0.9)"}},"required":["content"]}},"#,
     r#"{"name":"mempalace_add_drawer","description":"File verbatim content into the palace. Checks for duplicates first.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing (project name)"},"room":{"type":"string","description":"Room (aspect: backend, decisions, meetings...)"},"content":{"type":"string","description":"Verbatim content to store \u2014 exact words, never summarized"},"source_file":{"type":"string","description":"Where this came from (optional)"},"added_by":{"type":"string","description":"Who is filing this (default: mcp)"}},"required":["wing","room","content"]}},"#,
     r#"{"name":"mempalace_delete_drawer","description":"Delete a drawer by ID. Irreversible.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to delete"}},"required":["drawer_id"]}},"#,
+    r#"{"name":"mempalace_update_drawer","description":"Update the content (and optionally wing/room) of an existing drawer by ID. Re-embeds and re-indexes automatically. Use this to correct facts, update paths, or revise stored text without deleting and re-adding.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to update"},"content":{"type":"string","description":"New content to store"},"wing":{"type":"string","description":"New wing (optional — keeps existing if omitted)"},"room":{"type":"string","description":"New room (optional — keeps existing if omitted)"}},"required":["drawer_id","content"]}},"#,
+    r#"{"name":"mempalace_bulk_replace","description":"Find-and-replace a string across ALL drawer content in the palace. Returns count of updated drawers. Useful for bulk corrections like renamed paths, people, or projects.","inputSchema":{"type":"object","properties":{"find":{"type":"string","description":"Exact string to find"},"replace":{"type":"string","description":"String to replace it with"},"wing":{"type":"string","description":"Limit to this wing only (optional)"}},"required":["find","replace"]}},"#,
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}}"#,
     "]"
@@ -396,6 +398,55 @@ impl<'a> Server<'a> {
                     }
                     Err(e) => Err(e),
                 }
+            }
+
+            // ── mempalace_update_drawer ───────────────────────────────────────
+            "mempalace_update_drawer" => {
+                let drawer_id = get_str(args, "drawer_id")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: drawer_id"))?;
+                let new_content = get_str(args, "content")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: content"))?;
+                let new_wing = get_str(args, "wing");
+                let new_room = get_str(args, "room");
+
+                match self.db.update_drawer(
+                    drawer_id,
+                    new_content,
+                    new_wing,
+                    new_room,
+                    self.embedder.as_ref(),
+                ) {
+                    Ok(()) => Ok(serde_json::to_string(&json!({
+                        "success": true,
+                        "drawer_id": drawer_id,
+                    }))?),
+                    Err(e) if e.to_string().contains("DrawerNotFound") => {
+                        Ok(serde_json::to_string(&json!({
+                            "success": false,
+                            "error": format!("Drawer not found: {drawer_id}"),
+                        }))?)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+
+            // ── mempalace_bulk_replace ────────────────────────────────────────
+            "mempalace_bulk_replace" => {
+                let find = get_str(args, "find")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: find"))?;
+                let replace = get_str(args, "replace")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: replace"))?;
+                let wing = get_str(args, "wing");
+
+                let count = self
+                    .db
+                    .bulk_replace(find, replace, wing, self.embedder.as_ref())?;
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "updated": count,
+                    "find": find,
+                    "replace": replace,
+                }))?)
             }
 
             // ── mempalace_diary_write ─────────────────────────────────────────

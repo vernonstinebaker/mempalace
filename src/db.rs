@@ -917,6 +917,150 @@ impl Database {
 
     // ── delete_drawer ─────────────────────────────────────────────────────────
 
+    // ── update_drawer ─────────────────────────────────────────────────────────
+
+    /// Update content (and optionally wing/room) of an existing drawer.
+    /// Re-indexes FTS5 and re-embeds automatically.
+    pub fn update_drawer(
+        &self,
+        drawer_id: &str,
+        new_content: &str,
+        new_wing: Option<&str>,
+        new_room: Option<&str>,
+        embedder: Option<&Embedder>,
+    ) -> Result<()> {
+        // Get current values + rowid
+        let (old_content, cur_wing, cur_room, rowid): (String, String, String, i64) = self
+            .conn
+            .query_row(
+                "SELECT content, wing, room, rowid FROM drawers WHERE id = ?1",
+                params![drawer_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .map_err(|_| anyhow!("DrawerNotFound: {drawer_id}"))?;
+
+        let wing = new_wing.unwrap_or(&cur_wing);
+        let room = new_room.unwrap_or(&cur_room);
+
+        // Update the drawers table
+        self.conn.execute(
+            "UPDATE drawers SET content = ?1, wing = ?2, room = ?3 WHERE id = ?4",
+            params![new_content, wing, room, drawer_id],
+        )?;
+
+        // Sync FTS5 (triggers only fire on INSERT/DELETE, not UPDATE)
+        // Delete old entry then insert new
+        self.conn.execute(
+            "INSERT INTO drawers_fts(drawers_fts, rowid, content, wing, room)
+             VALUES ('delete', ?1, ?2, ?3, ?4)",
+            params![rowid, old_content, cur_wing, cur_room],
+        )?;
+        self.conn.execute(
+            "INSERT INTO drawers_fts(rowid, content, wing, room) VALUES (?1, ?2, ?3, ?4)",
+            params![rowid, new_content, wing, room],
+        )?;
+
+        // Re-embed: remove old embedding, insert new
+        let _ = self
+            .conn
+            .execute("DELETE FROM vec_drawers WHERE rowid = ?1", params![rowid]);
+        let _ = self
+            .conn
+            .execute("DELETE FROM vec_embedded WHERE rowid = ?1", params![rowid]);
+
+        if let Some(emb) = embedder {
+            if let Some(vec_bytes) = emb.embed(new_content) {
+                if self.add_embedding(rowid, &vec_bytes).is_ok() {
+                    self.mark_embedded(rowid);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Bulk find-and-replace across all drawer content.
+    /// Returns the number of drawers updated.
+    /// Re-indexes FTS5 via full rebuild and clears stale embeddings.
+    pub fn bulk_replace(
+        &self,
+        find: &str,
+        replace: &str,
+        wing: Option<&str>,
+        embedder: Option<&Embedder>,
+    ) -> Result<usize> {
+        // Collect affected rows before updating
+        let sql = match wing {
+            Some(_) => {
+                "SELECT id, rowid, content, wing, room FROM drawers \
+                         WHERE content LIKE '%' || ?1 || '%' AND wing = ?2"
+            }
+            None => {
+                "SELECT id, rowid, content, wing, room FROM drawers \
+                     WHERE content LIKE '%' || ?1 || '%'"
+            }
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows: Vec<(String, i64, String, String, String)> = match wing {
+            Some(w) => stmt
+                .query_map(params![find, w], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .map(|iter| iter.filter_map(|r| r.ok()).collect())?,
+            None => stmt
+                .query_map(params![find], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+                })
+                .map(|iter| iter.filter_map(|r| r.ok()).collect())?,
+        };
+
+        if rows.is_empty() {
+            return Ok(0);
+        }
+
+        let count = rows.len();
+
+        for (id, rowid, old_content, w, r) in &rows {
+            let new_content = old_content.replace(find, replace);
+
+            self.conn.execute(
+                "UPDATE drawers SET content = ?1 WHERE id = ?2",
+                params![new_content, id],
+            )?;
+
+            // FTS5: delete old, insert new
+            let _ = self.conn.execute(
+                "INSERT INTO drawers_fts(drawers_fts, rowid, content, wing, room)
+                 VALUES ('delete', ?1, ?2, ?3, ?4)",
+                params![rowid, old_content, w, r],
+            );
+            let _ = self.conn.execute(
+                "INSERT INTO drawers_fts(rowid, content, wing, room) VALUES (?1, ?2, ?3, ?4)",
+                params![rowid, new_content, w, r],
+            );
+
+            // Clear stale embeddings (will re-embed below)
+            let _ = self
+                .conn
+                .execute("DELETE FROM vec_drawers WHERE rowid = ?1", params![rowid]);
+            let _ = self
+                .conn
+                .execute("DELETE FROM vec_embedded WHERE rowid = ?1", params![rowid]);
+
+            // Re-embed immediately if embedder available
+            if let Some(emb) = embedder {
+                if let Some(vec_bytes) = emb.embed(&new_content) {
+                    if self.add_embedding(*rowid, &vec_bytes).is_ok() {
+                        self.mark_embedded(*rowid);
+                    }
+                }
+            }
+        }
+
+        Ok(count)
+    }
+
     pub fn delete_drawer(&self, drawer_id: &str) -> Result<()> {
         // Get rowid first
         let rowid: Option<i64> = self
