@@ -1,0 +1,38 @@
+[package]
+name = "mempalace"
+version = "3.0.0"
+edition = "2021"
+description = "MemPalace MCP server — single binary, semantic search via tract ONNX"
+
+[[bin]]
+name = "mempalace-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# SQLite — bundled so no system sqlite3 needed
+rusqlite = { version = "0.32", features = ["bundled"] }
+
+# SQLite-vec extension — zero-argument extern C init, loaded via sqlite3_auto_extension
+sqlite-vec = "0.1.9"
+
+# ONNX inference — pure Rust, zero native deps, produces a fully static binary
+# tract_ndarray is re-exported from tract-data (a transitive dep of tract-onnx)
+tract-onnx = "0.23.0-dev.3"
+
+# HuggingFace tokenizers — WordPiece BERT tokenization
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+
+# JSON
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+anyhow = "1"
+md5 = "0.7"
+walkdir = "2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
