@@ -14,8 +14,8 @@ install: build
 	@echo "Installed: $(INSTALL_PATH)"
 
 test:
-	python3 /Users/vds/Programming/Zig/MemPalace/test/e2e.py \
-		--binary $(abspath $(BINARY))
+	# End-to-end test script to be implemented
+	@echo "No test script configured - run benchmarks manually"
 
 clean:
 	cargo clean

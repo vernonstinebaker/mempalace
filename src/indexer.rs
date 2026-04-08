@@ -33,8 +33,6 @@ const SKIP_DIRS: &[&str] = &[
     ".vscode",
     "Pods",        // iOS CocoaPods
     "DerivedData", // Xcode
-    ".zig-cache",
-    "zig-out",
 ];
 
 /// Exact file names (case-insensitive) that are always skipped.
@@ -59,7 +57,6 @@ const SKIP_FILES: &[&str] = &[
 ///   MEMPALACE_EXTENSIONS="rs,go,py,md"  (comma-separated, replaces the default list)
 const DEFAULT_TEXT_EXTENSIONS: &[&str] = &[
     "rs",
-    "zig",
     "c",
     "cpp",
     "cc",

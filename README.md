@@ -57,7 +57,7 @@ All 21 tools follow MCP conventions:
 ```sh
 mempalace import-palace /path/to/old/palace.db
 ```
-Migrates drawers and triples from any compatible MemPalace SQLite database (Zig or Rust version).
+Migrates drawers and triples from any compatible MemPalace SQLite database (original Python or Rust version).
 
 ### ✅ Import OpenCode Sessions
 ```sh
@@ -202,7 +202,7 @@ MEMPALACE_PALACE_PATH=~/mempalace mempalace-mcp
 
 ### Maintenance Commands
 ```sh
-# Import existing palace (Zig or Rust version)
+# Import existing palace (original Python or Rust version)
 mempalace import-palace /path/to/old/palace.db
 
 # Import OpenCode sessions
@@ -251,6 +251,7 @@ DEALINGS IN THE SOFTWARE.
 - Rust/sqlite-vec integration → [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec)
 - Pure-Rust ONNX → [github.com/pelotom/ tract](https://github.com/pelotom/tract)
 - Benchmark methodology → [LongMemEval](https://github.com/xiaowu0162/LongMemEval)
+- Implementation → Developed with AI assistance using OpenCode and various LLMs for code generation, cross-checking, and refinement
 
 ## 🤝 Contributing
 
