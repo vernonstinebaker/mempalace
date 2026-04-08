@@ -178,7 +178,7 @@ By category (user-turns-only):
 ### Binary Installation
 ```sh
 # Build from source (requires Rust 1.75+)
-git clone https://orangepi:3000/vds/mempalace.git
+git clone https://github.com/vernonstinebaker/mempalace.git
 cd mempalace
 cargo build --release
 
