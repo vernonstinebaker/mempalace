@@ -1,0 +1,116 @@
+name: 🐛 Bug Report
+description: Report a reproducible bug or regression
+title: "[BUG] "
+labels: ["bug"]
+assignees:
+  - vds
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report this bug!
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: MemPalace version (check with `mempalace-mcp --version` or Cargo.toml)
+      placeholder: v3.0.0
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: What OS are you running MemPalace on?
+      options:
+        - macOS (Intel)
+        - macOS (Apple Silicon)
+        - Linux
+        - Windows
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to Reproduce
+      description: Please provide detailed steps to reproduce the bug
+      placeholder: |
+        1. Start MemPalace with MEMPALACE_PALACE_PATH=/tmp/test
+        2. Call mempalace_add_drawer with wing=test, room=test, content="hello"
+        3. Call mempalace_search with query="hello"
+        4. Observe unexpected behavior
+      value: |
+        1.
+        2.
+        3.
+        4.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What should happen?
+      validations:
+        required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happens?
+      validations:
+        required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs and Output
+      description: |
+        Please include relevant logs, MCP server output, and results from diagnostic commands.
+        For crashes, include the full backtrace.
+        You can enable verbose logging with RUST_LOG=debug.
+      placeholder: |
+        MemPalace server output:
+        ```
+        [INFO] Palace opened at /tmp/test/palace.db
+        [ERROR] Failed to process request: ...
+        ```
+        Diagnostic commands:
+        ```
+        mempalace-mcp --info
+        mempalace_mempalace_status
+        ```
+    validations:
+      required: false
+  - type: textarea
+    id: palace-state
+    attributes:
+      label: Palace State (if relevant)
+      description: |
+        Output from these commands can help diagnose storage-related issues:
+        - mempalace-mcp --info
+        - mempalace_mempalace_status
+        - mempalace_list_wings
+        - mempalace_get_taxonomy
+        - mempalace_kg_stats
+      placeholder: |
+        ```
+        MemPalace v3.0.0 (Rust)
+        Palace dir: /tmp/test
+        Total drawers: 42
+        ...
+        ```
+    validations:
+      required: false
+  - type: checkboxes
+    id: reproducibility-check
+    attributes:
+      label: Reproducibility Check
+      description: Please verify these before submitting
+      options:
+        - label: I have reproduced this issue on the latest master branch
+        - label: I have checked existing issues for similar reports
+        - label: I have provided a minimal reproduction case
+        - label: This is not a duplicate of an existing issue
+    validations:
+      required: true

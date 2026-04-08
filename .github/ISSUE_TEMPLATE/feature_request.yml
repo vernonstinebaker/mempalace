@@ -1,0 +1,57 @@
+name: 💡 Feature Request
+description: Suggest a new feature or enhancement for MemPalace
+title: "[FEATURE] "
+labels: ["enhancement"]
+assignees:
+  - vds
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for suggesting a feature for MemPalace!
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why would this feature be useful? What problem does it solve?
+      placeholder: |
+        I often find myself needing to [...]
+        Currently, I have to [...]
+    validations:
+      required: true
+  - type: textarea
+    id: use-case
+    attributes:
+      label: Use Case(s)
+      description: Please describe specific scenarios where you would use this feature
+      placeholder: |
+        - When doing X, I want to be able to Y so that Z
+        - In the context of A, this would enable B
+    validations:
+      required: true
+  - type: textarea
+    id: alternative-approaches
+    attributes:
+      label: Alternative Approaches
+      description: |
+        Have you considered other ways to achieve the same goal?
+        Are there existing tools or workflows that partially address this need?
+      placeholder: |
+        - Existing tool Z does something similar but lacks [...]
+        - Workaround W involves [...]
+        - One could imagine doing V instead, but [...]
+    validations:
+      required: false
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: |
+        Add any other context, screenshots, or diagrams about the feature request here.
+        Consider:
+        - Performance implications
+        - Backward compatibility concerns
+        - Interaction with existing features
+        - Security or privacy considerations
+    validations:
+      required: false

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 💬 General Discussion
+    url: https://orangepi:3000/vds/mempalace/discussions
+    about: Ask questions, share ideas, or talk about MemPalace

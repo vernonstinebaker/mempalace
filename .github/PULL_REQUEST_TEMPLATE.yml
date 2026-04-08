@@ -1,0 +1,82 @@
+name: 🔧 Pull Request
+description: Submit a pull request for review
+title: "[PR] "
+labels: ["pull request"]
+assignees:
+  - vds
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for submitting a pull request! Please fill out this template to help reviewers understand your changes.
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: |
+        Provide a brief summary of your changes.
+        What problem does this solve? What feature does it add?
+      placeholder: |
+        This PR adds a new mempalace_update_drawer tool that allows updating drawer content in-place while keeping FTS5 and vector indexes in sync.
+        It addresses the write-only limitation identified in issue #XX.
+    validations:
+      required: true
+  - type: textarea
+    id: related-issue
+    attributes:
+      label: Related Issue
+      description: |
+        If this PR addresses an existing issue, please link it here.
+        Use the format: "Fixes #123" or "Related to #456"
+      placeholder: Fixes #123
+    validations:
+      required: false
+  - type: checkboxes
+    id: checklist
+    attributes:
+      label: Checklist
+      description: Please verify these items before submitting
+      options:
+        - label: I have tested these changes locally
+        - label: I have run `cargo fmt` on the modified files
+        - label: I have run `cargo clippy` and fixed all warnings
+        - label: I have added or updated tests for new/changed logic
+        - label: I have updated the README or other documentation if needed
+        - label: The changes are backward compatible (unless this is a breaking change PR)
+        - label: I have run the LongMemEval benchmark to check for regressions (if relevant)
+        - label: The binary size increase is justified and documented (if applicable)
+    validations:
+      required: true
+  - type: textarea
+    id: testing
+    attributes:
+      label: Testing Performed
+      description: |
+        Please describe the testing you performed to validate your changes.
+        Include:
+        - Unit tests run
+        - Manual testing steps
+        - Benchmark results (if applicable)
+        - Any edge cases you considered
+      placeholder: |
+        - Ran cargo test --release
+        - Tested update_drawer tool via MCP stdio
+        - Verified FTS5 triggers fire correctly
+        - Confirmed embeddings are regenerated when content changes
+        - Checked that invalid drawer ID returns proper error
+        - Ran longmemeval_rust_useronly.py - score unchanged at 94.04%
+    validations:
+      required: false
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional Context
+      description: |
+        Add any other context about the pull request here.
+        Consider:
+        - Performance implications
+        - Breaking changes (if any)
+        - Migration steps for users
+        - Future work this enables
+    validations:
+      required: false
