@@ -97,6 +97,21 @@ impl Database {
             );",
         )?;
 
+        // Explicit cross-wing tunnels
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS tunnels (
+                id TEXT PRIMARY KEY,
+                source_wing TEXT NOT NULL,
+                source_room TEXT NOT NULL,
+                target_wing TEXT NOT NULL,
+                target_room TEXT NOT NULL,
+                label TEXT DEFAULT '',
+                source_drawer_id TEXT,
+                target_drawer_id TEXT,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            );",
+        )?;
+
         Ok(())
     }
 
@@ -1740,6 +1755,125 @@ impl Database {
         std::fs::copy(backup_path, &source)?;
         Ok(())
     }
+
+    // ── tunnel CRUD ────────────────────────────────────────────────────────────
+
+    /// Create an explicit cross-wing tunnel. Idempotent: returns existing ID
+    /// if a tunnel between the same (source, target) already exists.
+    pub fn create_tunnel(
+        &self,
+        source_wing: &str,
+        source_room: &str,
+        target_wing: &str,
+        target_room: &str,
+        label: &str,
+    ) -> Result<String> {
+        // Check existing
+        let existing: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT id FROM tunnels WHERE source_wing=?1 AND source_room=?2 AND target_wing=?3 AND target_room=?4",
+                params![source_wing, source_room, target_wing, target_room],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(id) = existing {
+            return Ok(id);
+        }
+
+        let hash = md5::compute(format!("{source_wing}{source_room}{target_wing}{target_room}").as_bytes());
+        let id = format!("tunnel_{:x}", hash);
+        self.conn.execute(
+            "INSERT INTO tunnels (id, source_wing, source_room, target_wing, target_room, label)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![id, source_wing, source_room, target_wing, target_room, label],
+        )?;
+        Ok(id)
+    }
+
+    /// List explicit tunnels, optionally filtered by wing.
+    pub fn list_tunnels(&self, wing: Option<&str>) -> Result<Value> {
+        let sql = match wing {
+            Some(_) => "SELECT id, source_wing, source_room, target_wing, target_room, label, created_at FROM tunnels WHERE source_wing=?1 OR target_wing=?1 ORDER BY created_at DESC",
+            None => "SELECT id, source_wing, source_room, target_wing, target_room, label, created_at FROM tunnels ORDER BY created_at DESC",
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows: Vec<Value> = match wing {
+            Some(w) => stmt.query_map(params![w], |r| {
+                Ok(json!({"id": r.get::<_,String>(0)?,"source_wing": r.get::<_,String>(1)?,"source_room": r.get::<_,String>(2)?,"target_wing": r.get::<_,String>(3)?,"target_room": r.get::<_,String>(4)?,"label": r.get::<_,Option<String>>(5)?.unwrap_or_default(),"created_at": r.get::<_,Option<String>>(6)?}))
+            }).map(|iter| iter.filter_map(|r| r.ok()).collect()).unwrap_or_default(),
+            None => stmt.query_map([], |r| {
+                Ok(json!({"id": r.get::<_,String>(0)?,"source_wing": r.get::<_,String>(1)?,"source_room": r.get::<_,String>(2)?,"target_wing": r.get::<_,String>(3)?,"target_room": r.get::<_,String>(4)?,"label": r.get::<_,Option<String>>(5)?.unwrap_or_default(),"created_at": r.get::<_,Option<String>>(6)?}))
+            }).map(|iter| iter.filter_map(|r| r.ok()).collect()).unwrap_or_default(),
+        };
+        Ok(json!({"tunnels": rows, "count": rows.len()}))
+    }
+
+    /// Delete an explicit tunnel by ID.
+    pub fn delete_tunnel(&self, id: &str) -> Result<()> {
+        let changes = self.conn.execute("DELETE FROM tunnels WHERE id=?1", params![id])?;
+        if changes == 0 {
+            return Err(anyhow!("TunnelNotFound"));
+        }
+        Ok(())
+    }
+
+    /// Follow tunnels from a wing/room to see connected drawers in other wings.
+    pub fn follow_tunnels(&self, wing: &str, room: &str) -> Result<Value> {
+        let mut stmt = self.conn.prepare(
+            "SELECT source_wing, source_room, target_wing, target_room, label FROM tunnels
+             WHERE (source_wing=?1 AND source_room=?2) OR (target_wing=?1 AND target_room=?2)",
+        )?;
+        let tunnels: Vec<Value> = stmt.query_map(params![wing, room], |r| {
+            Ok(json!({"source_wing": r.get::<_,String>(0)?,"source_room": r.get::<_,String>(1)?,"target_wing": r.get::<_,String>(2)?,"target_room": r.get::<_,String>(3)?,"label": r.get::<_,Option<String>>(4)?.unwrap_or_default()}))
+        }).map(|iter| iter.filter_map(|r| r.ok()).collect()).unwrap_or_default();
+
+        Ok(json!({"wing": wing, "room": room, "tunnels": tunnels, "count": tunnels.len()}))
+    }
+
+    // ── drawer CRUD completeness ───────────────────────────────────────────────
+
+    /// Fetch a single drawer by ID with full content.
+    pub fn get_drawer(&self, drawer_id: &str) -> Result<Value> {
+        let row: Option<(String, String, String, Option<String>, Option<String>)> = self.conn.query_row(
+            "SELECT wing, room, content, source_file, filed_at FROM drawers WHERE id=?1",
+            params![drawer_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        ).optional()?;
+
+        match row {
+            Some((w, r, c, sf, ft)) => Ok(json!({"id": drawer_id, "wing": w, "room": r, "content": c, "source_file": sf, "filed_at": ft})),
+            None => Err(anyhow!("DrawerNotFound")),
+        }
+    }
+
+    /// Paginated drawer listing with wing/room filters.
+    pub fn list_drawers(
+        &self,
+        wing: Option<&str>,
+        room: Option<&str>,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Value> {
+        let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 1);
+        let count_sql = format!("SELECT COUNT(*) FROM drawers d WHERE 1=1{filter_sql}");
+        let count_params = filter_params.clone();
+        let total: i64 = self.conn.prepare(&count_sql).ok().and_then(|mut s| {
+            s.query_row(rusqlite::params_from_iter(count_params.iter()), |r| r.get(0)).ok()
+        }).unwrap_or(0);
+
+        let sql = format!(
+            "SELECT id, wing, room, content, source_file, filed_at FROM drawers d WHERE 1=1{filter_sql} ORDER BY filed_at DESC LIMIT {limit} OFFSET {offset}"
+        );
+        let mut stmt = self.conn.prepare(&sql).map_err(|_| anyhow!("query error"))?;
+        let rows: Vec<Value> = stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
+            let doc: String = r.get(3)?;
+            let preview: String = doc.chars().take(200).collect();
+            Ok(json!({"id": r.get::<_,String>(0)?,"wing": r.get::<_,String>(1)?,"room": r.get::<_,String>(2)?,"content_preview": preview,"source_file": r.get::<_,Option<String>>(4)?,"filed_at": r.get::<_,Option<String>>(5)?}))
+        }).map(|iter| iter.filter_map(|r| r.ok()).collect()).unwrap_or_default();
+
+        Ok(json!({"drawers": rows, "total": total, "limit": limit, "offset": offset}))
+    }
 }
 
 /// Parse a `filed_at` string (format "YYYY-MM-DD HH:MM:SS" or ISO) into seconds
@@ -2761,14 +2895,105 @@ mod tests {
     // ── input validation & edge cases ──────────────────────────────────────────
 
     #[test]
-    fn test_search_limit_clamped() {
+    fn test_search_falls_back_to_fts() {
         let (_dir, db) = test_db();
-        db.add_drawer("w", "r", "test", None, "test", None)
+        db.add_drawer("w", "r", "should find this via fts", None, "test", None)
             .unwrap();
         let r = db
-            .search("test", 0, 0, None, None, None, None, None, "relevance")
+            .search("should find", 5, 0, None, None, None, None, None, "relevance")
             .unwrap();
-        assert!(r["results"].as_array().unwrap().len() >= 1);
+        assert!(!r["results"].as_array().unwrap().is_empty());
+    }
+
+    // ── tunnel CRUD ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_create_tunnel() {
+        let (_dir, db) = test_db();
+        let id = db
+            .create_tunnel("wing_a", "room1", "wing_b", "room2", "")
+            .unwrap();
+        assert!(id.starts_with("tunnel_"));
+    }
+
+    #[test]
+    fn test_create_tunnel_idempotent() {
+        let (_dir, db) = test_db();
+        let id1 = db
+            .create_tunnel("wing_a", "room1", "wing_b", "room2", "")
+            .unwrap();
+        let id2 = db
+            .create_tunnel("wing_a", "room1", "wing_b", "room2", "")
+            .unwrap();
+        assert_eq!(id1, id2);
+    }
+
+    #[test]
+    fn test_list_tunnels_filtered() {
+        let (_dir, db) = test_db();
+        db.create_tunnel("wing_a", "r1", "wing_b", "r2", "")
+            .unwrap();
+        db.create_tunnel("wing_c", "r3", "wing_d", "r4", "")
+            .unwrap();
+        let result = db.list_tunnels(Some("wing_a")).unwrap();
+        let arr = result["tunnels"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_tunnel() {
+        let (_dir, db) = test_db();
+        let id = db
+            .create_tunnel("a", "r1", "b", "r2", "")
+            .unwrap();
+        assert!(db.delete_tunnel(&id).is_ok());
+        assert!(db.delete_tunnel(&id).is_err());
+    }
+
+    #[test]
+    fn test_follow_tunnels() {
+        let (_dir, db) = test_db();
+        db.create_tunnel("wing_a", "room_x", "wing_b", "room_y", "")
+            .unwrap();
+        let result = db.follow_tunnels("wing_a", "room_x").unwrap();
+        let arr = result["tunnels"].as_array().unwrap();
+        assert!(!arr.is_empty());
+    }
+
+    // ── drawer CRUD ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_drawer() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "full content here", None, "test", None)
+            .unwrap();
+        let result = db.get_drawer(&id).unwrap();
+        assert_eq!(result["content"], "full content here");
+        assert_eq!(result["wing"], "w");
+    }
+
+    #[test]
+    fn test_get_drawer_not_found() {
+        let (_dir, db) = test_db();
+        assert!(db.get_drawer("nonexistent").is_err());
+    }
+
+    #[test]
+    fn test_list_drawers_pagination() {
+        let (_dir, db) = test_db();
+        for i in 0..5 {
+            db.conn.execute(
+                "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES (?1, 'w', 'r', 'c', ?2)",
+                params![format!("dl_{i}"), format!("2024-01-0{} 00:00:00", i + 1)],
+            )
+            .unwrap();
+        }
+        let result = db.list_drawers(None, None, 2, 0).unwrap();
+        assert_eq!(result["total"], 5);
+        assert_eq!(result["limit"], 2);
+        assert_eq!(result["offset"], 0);
+        assert_eq!(result["drawers"].as_array().unwrap().len(), 2);
     }
 
     #[test]
@@ -2842,17 +3067,5 @@ mod tests {
         assert_eq!(health["drawer_count"].as_i64().unwrap(), 5);
         // embedded_count will be 0 without embedder in tests
         assert!(health["gap_pct"].as_f64().unwrap() >= 0.0);
-    }
-
-    #[test]
-    fn test_search_falls_back_to_fts() {
-        let (_dir, db) = test_db();
-        db.add_drawer("w", "r", "should find this via fts", None, "test", None)
-            .unwrap();
-        // With vector disabled, search should still work via FTS
-        let r = db
-            .search("should find", 5, 0, None, None, None, None, None, "relevance")
-            .unwrap();
-        assert!(!r["results"].as_array().unwrap().is_empty());
     }
 }

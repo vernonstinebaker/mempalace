@@ -92,15 +92,24 @@ impl<'a> KnowledgeGraph<'a> {
         predicate: &str,
         object: &str,
         valid_from: Option<&str>,
+        valid_to: Option<&str>,
         source_closet: Option<&str>,
     ) -> Result<String> {
+        // Reject inverted intervals: valid_to < valid_from
+        if let (Some(vf), Some(vt)) = (valid_from, valid_to) {
+            if vt < vf {
+                return Err(anyhow::anyhow!(
+                    "Invalid date range: valid_to ({vt}) precedes valid_from ({vf})"
+                ));
+            }
+        }
+
         // Idempotency: return existing active triple if it exists
         let existing: Option<String> = self
             .db
             .conn
             .query_row(
-                "SELECT id FROM triples
-                 WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_until IS NULL",
+                "SELECT id FROM triples WHERE subject=?1 AND predicate=?2 AND object=?3 AND valid_until IS NULL",
                 params![subject, predicate, object],
                 |r| r.get(0),
             )
@@ -127,8 +136,8 @@ impl<'a> KnowledgeGraph<'a> {
 
         self.db.conn.execute(
             "INSERT INTO triples (id, subject, predicate, object, valid_from, valid_until, source_closet)
-             VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6)",
-            params![triple_id, subject, predicate, object, valid_from, source_closet],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![triple_id, subject, predicate, object, valid_from, valid_to, source_closet],
         )?;
 
         Ok(triple_id)
@@ -303,7 +312,7 @@ mod tests {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
         let id = kg
-            .add_triple("Alice", "loves", "chess", None, None)
+            .add_triple("Alice", "loves", "chess", None, None, None)
             .unwrap();
         assert!(id.starts_with("triple_"));
         // Verify in DB
@@ -325,10 +334,10 @@ mod tests {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
         let id1 = kg
-            .add_triple("Alice", "loves", "chess", None, None)
+            .add_triple("Alice", "loves", "chess", None, None, None)
             .unwrap();
         let id2 = kg
-            .add_triple("Alice", "loves", "chess", None, None)
+            .add_triple("Alice", "loves", "chess", None, None, None)
             .unwrap();
         assert_eq!(id1, id2); // Same active triple returns same ID
     }
@@ -338,7 +347,7 @@ mod tests {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
         let id = kg
-            .add_triple("Max", "started_school", "Year 7", Some("2026-09-01"), None)
+            .add_triple("Max", "started_school", "Year 7", Some("2026-09-01"), None, None)
             .unwrap();
         let vf: String = db
             .conn
@@ -356,7 +365,7 @@ mod tests {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
         let id = kg
-            .add_triple("X", "relates_to", "Y", None, Some("closet_42"))
+            .add_triple("X", "relates_to", "Y", None, None, Some("closet_42"))
             .unwrap();
         let sc: String = db
             .conn
@@ -373,9 +382,9 @@ mod tests {
     fn test_query_entity_outgoing() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "child_of", "Bob", None, None)
+        kg.add_triple("Alice", "child_of", "Bob", None, None, None)
             .unwrap();
-        kg.add_triple("Bob", "child_of", "Charlie", None, None)
+        kg.add_triple("Bob", "child_of", "Charlie", None, None, None)
             .unwrap();
         let facts = kg
             .query_entity("Alice", None, "outgoing")
@@ -391,7 +400,7 @@ mod tests {
     fn test_query_entity_incoming() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "child_of", "Bob", None, None)
+        kg.add_triple("Alice", "child_of", "Bob", None, None, None)
             .unwrap();
         let facts = kg.query_entity("Bob", None, "incoming").unwrap();
         let arr = facts.as_array().unwrap();
@@ -403,9 +412,9 @@ mod tests {
     fn test_query_entity_both() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "child_of", "Bob", None, None)
+        kg.add_triple("Alice", "child_of", "Bob", None, None, None)
             .unwrap();
-        kg.add_triple("Bob", "child_of", "Charlie", None, None)
+        kg.add_triple("Bob", "child_of", "Charlie", None, None, None)
             .unwrap();
         let facts = kg.query_entity("Bob", None, "both").unwrap();
         let arr = facts.as_array().unwrap();
@@ -416,7 +425,7 @@ mod tests {
     fn test_query_as_of() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "works_at", "ACME", Some("2020-01-01"), None)
+        kg.add_triple("Alice", "works_at", "ACME", Some("2020-01-01"), None, None)
             .unwrap();
         // Should be valid at 2021-01-01
         let facts = kg
@@ -434,7 +443,7 @@ mod tests {
     fn test_invalidate() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "works_at", "ACME", Some("2020-01-01"), None)
+        kg.add_triple("Alice", "works_at", "ACME", Some("2020-01-01"), None, None)
             .unwrap();
         kg.invalidate("Alice", "works_at", "ACME", Some("2024-01-01"))
             .unwrap();
@@ -453,7 +462,7 @@ mod tests {
     fn test_invalidate_defaults_to_today() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "works_at", "ACME", None, None)
+        kg.add_triple("Alice", "works_at", "ACME", None, None, None)
             .unwrap();
         kg.invalidate("Alice", "works_at", "ACME", None).unwrap();
         let vu: Option<String> = db
@@ -471,9 +480,9 @@ mod tests {
     fn test_timeline_entity() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "born", "1990", Some("1990-01-01"), None)
+        kg.add_triple("Alice", "born", "1990", Some("1990-01-01"), None, None)
             .unwrap();
-        kg.add_triple("Alice", "graduated", "2012", Some("2012-06-01"), None)
+        kg.add_triple("Alice", "graduated", "2012", Some("2012-06-01"), None, None)
             .unwrap();
         let timeline = kg.get_timeline(Some("Alice")).unwrap();
         let arr = timeline.as_array().unwrap();
@@ -484,22 +493,53 @@ mod tests {
     }
 
     #[test]
-    fn test_timeline_all() {
+    fn test_stats_with_expired_facts() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("X", "a", "Y", None, None).unwrap();
-        let timeline = kg.get_timeline(None).unwrap();
-        let arr = timeline.as_array().unwrap();
-        assert!(!arr.is_empty());
+        kg.add_triple("A", "p", "B", None, None, None).unwrap();
+        kg.invalidate("A", "p", "B", Some("2025-01-01"))
+            .unwrap();
+        let stats = kg.get_stats().unwrap();
+        assert_eq!(stats["total_triples"], 1);
+        assert_eq!(stats["current_facts"], 0);
+        assert_eq!(stats["expired_facts"], 1);
+    }
+
+    #[test]
+    fn test_add_triple_with_valid_to() {
+        let (_dir, db) = test_db();
+        let kg = KnowledgeGraph::new(&db);
+        let id = kg
+            .add_triple("Alice", "worked_at", "ACME", Some("2020-01-01"), Some("2023-12-31"), None)
+            .unwrap();
+        // Verify valid_until is set
+        let vu: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT valid_until FROM triples WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(vu.unwrap(), "2023-12-31");
+    }
+
+    #[test]
+    fn test_add_triple_rejects_inverted_interval() {
+        let (_dir, db) = test_db();
+        let kg = KnowledgeGraph::new(&db);
+        let result = kg.add_triple("X", "p", "Y", Some("2024-12-31"), Some("2020-01-01"), None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("precedes"));
     }
 
     #[test]
     fn test_stats() {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("Alice", "loves", "chess", None, None)
+        kg.add_triple("Alice", "loves", "chess", None, None, None)
             .unwrap();
-        kg.add_triple("Bob", "loves", "go", None, None)
+        kg.add_triple("Bob", "loves", "go", None, None, None)
             .unwrap();
         let stats = kg.get_stats().unwrap();
         assert_eq!(stats["total_triples"], 2);
@@ -511,19 +551,5 @@ mod tests {
         let rels = stats["relationship_types"].as_array().unwrap();
         assert_eq!(rels.len(), 1);
         assert_eq!(rels[0], "loves");
-    }
-
-    #[test]
-    fn test_stats_with_expired_facts() {
-        let (_dir, db) = test_db();
-        let kg = KnowledgeGraph::new(&db);
-        kg.add_triple("A", "p", "B", None, None).unwrap();
-        // Invalidate it
-        kg.invalidate("A", "p", "B", Some("2025-01-01"))
-            .unwrap();
-        let stats = kg.get_stats().unwrap();
-        assert_eq!(stats["total_triples"], 1);
-        assert_eq!(stats["current_facts"], 0);
-        assert_eq!(stats["expired_facts"], 1);
     }
 }

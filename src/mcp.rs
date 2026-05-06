@@ -51,7 +51,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_get_taxonomy","description":"Full taxonomy: wing \u2192 room \u2192 drawer count","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_get_aaak_spec","description":"Get the AAAK dialect specification \u2014 the compressed memory format MemPalace uses. Call this if you need to read or write AAAK-compressed memories.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_kg_query","description":"Query the knowledge graph for an entity's relationships. Returns typed facts with temporal validity. E.g. 'Max' \u2192 child_of Alice, loves chess, does swimming. Filter by date with as_of to see what was true at a point in time.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"Entity to query (e.g. 'Max', 'MyProject', 'Alice')"},"as_of":{"type":"string","description":"Date filter \u2014 only facts valid at this date (YYYY-MM-DD, optional)"},"direction":{"type":"string","description":"outgoing (entity\u2192?), incoming (?\u2192entity), or both (default: both)"}},"required":["entity"]}},"#,
-    r#"{"name":"mempalace_kg_add","description":"Add a fact to the knowledge graph. Subject \u2192 predicate \u2192 object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01').","inputSchema":{"type":"object","properties":{"subject":{"type":"string","description":"The entity doing/being something"},"predicate":{"type":"string","description":"The relationship type (e.g. 'loves', 'works_on', 'daughter_of')"},"object":{"type":"string","description":"The entity being connected to"},"valid_from":{"type":"string","description":"When this became true (YYYY-MM-DD, optional)"},"source_closet":{"type":"string","description":"Closet ID where this fact appears (optional)"}},"required":["subject","predicate","object"]}},"#,
+    r#"{"name":"mempalace_kg_add","description":"Add a fact to the knowledge graph. Subject \u2192 predicate \u2192 object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01'). valid_to sets an end date without needing a separate invalidate call.","inputSchema":{"type":"object","properties":{"subject":{"type":"string","description":"The entity doing/being something"},"predicate":{"type":"string","description":"The relationship type (e.g. 'loves', 'works_on', 'daughter_of')"},"object":{"type":"string","description":"The entity being connected to"},"valid_from":{"type":"string","description":"When this became true (YYYY-MM-DD, optional)"},"valid_to":{"type":"string","description":"When this stopped being true (YYYY-MM-DD, optional)"},"source_closet":{"type":"string","description":"Closet ID where this fact appears (optional)"}},"required":["subject","predicate","object"]}},"#,
     r#"{"name":"mempalace_kg_invalidate","description":"Mark a fact as no longer true. E.g. ankle injury resolved, job ended, moved house.","inputSchema":{"type":"object","properties":{"subject":{"type":"string","description":"Entity"},"predicate":{"type":"string","description":"Relationship"},"object":{"type":"string","description":"Connected entity"},"ended":{"type":"string","description":"When it stopped being true (YYYY-MM-DD, default: today)"}},"required":["subject","predicate","object"]}},"#,
     r#"{"name":"mempalace_kg_timeline","description":"Chronological timeline of facts. Shows the story of an entity (or everything) in order.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"Entity to get timeline for (optional \u2014 omit for full timeline)"}}}},"#,
     r#"{"name":"mempalace_kg_stats","description":"Knowledge graph overview: entities, triples, current vs expired facts, relationship types.","inputSchema":{"type":"object","properties":{}}},"#,
@@ -74,7 +74,13 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_restore","description":"Restore the palace from a backup file. WARNING: replaces current data.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Path to the backup .db file to restore from"}},"required":["path"]}},"#,
     r#"{"name":"mempalace_repair","description":"Reindex all drawers (backfill missing embeddings). Use when vector health shows divergence or after importing many sessions.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_reconnect","description":"Rebuild FTS index and re-probe vector health. Use after external writes or when search returns unexpected results.","inputSchema":{"type":"object","properties":{}}},"#,
-    r#"{"name":"mempalace_wal_log","description":"Read write-ahead log entries (audit trail). Returns last N entries newest-first.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max entries to return (default 20)"}}}}"#,
+    r#"{"name":"mempalace_wal_log","description":"Read write-ahead log entries (audit trail). Returns last N entries newest-first.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max entries to return (default 20)"}}}},"#,
+    r#"{"name":"mempalace_create_tunnel","description":"Create an explicit cross-wing tunnel linking ideas in different wings.","inputSchema":{"type":"object","properties":{"source_wing":{"type":"string","description":"Source wing"},"source_room":{"type":"string","description":"Source room"},"target_wing":{"type":"string","description":"Target wing"},"target_room":{"type":"string","description":"Target room"},"label":{"type":"string","description":"Optional label for this tunnel"}},"required":["source_wing","source_room","target_wing","target_room"]}},"#,
+    r#"{"name":"mempalace_list_tunnels","description":"List explicit cross-wing tunnels, optionally filtered by wing.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"}}}},"#,
+    r#"{"name":"mempalace_delete_tunnel","description":"Delete an explicit cross-wing tunnel by ID.","inputSchema":{"type":"object","properties":{"tunnel_id":{"type":"string","description":"Tunnel ID to delete"}},"required":["tunnel_id"]}},"#,
+    r#"{"name":"mempalace_follow_tunnels","description":"Follow explicit tunnels from a wing/room to see connected ideas in other wings.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing name"},"room":{"type":"string","description":"Room name"}},"required":["wing","room"]}},"#,
+    r#"{"name":"mempalace_get_drawer","description":"Fetch a single drawer by ID with full content and metadata.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to fetch"}},"required":["drawer_id"]}},"#,
+    r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"}}}}"#,
     "]"
 );
 
@@ -265,9 +271,10 @@ impl<'a> Server<'a> {
                 let object = get_str(args, "object")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: object"))?;
                 let valid_from = validate::sanitize_iso_date(get_str(args, "valid_from"))?;
+                let valid_to = validate::sanitize_iso_date(get_str(args, "valid_to"))?;
                 let source_closet = get_str(args, "source_closet");
                 let triple_id =
-                    kg.add_triple(subject, predicate, object, valid_from, source_closet)?;
+                    kg.add_triple(subject, predicate, object, valid_from, valid_to, source_closet)?;
                 let fact_str = format!("{subject} \u{2192} {predicate} \u{2192} {object}");
                 Ok(serde_json::to_string(&json!({
                     "success": true,
@@ -655,6 +662,93 @@ impl<'a> Server<'a> {
                     "entries": entries,
                     "count": entries.len(),
                 }))?)
+            }
+
+            // ── mempalace_create_tunnel ────────────────────────────────────────
+            "mempalace_create_tunnel" => {
+                let source_wing = validate::sanitize_name_required(
+                    get_str(args, "source_wing")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: source_wing"))?,
+                    "source_wing",
+                )?;
+                let source_room = validate::sanitize_name_required(
+                    get_str(args, "source_room")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: source_room"))?,
+                    "source_room",
+                )?;
+                let target_wing = validate::sanitize_name_required(
+                    get_str(args, "target_wing")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: target_wing"))?,
+                    "target_wing",
+                )?;
+                let target_room = validate::sanitize_name_required(
+                    get_str(args, "target_room")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: target_room"))?,
+                    "target_room",
+                )?;
+                let label = get_str(args, "label").unwrap_or("");
+                let id = self.db.create_tunnel(
+                    source_wing,
+                    source_room,
+                    target_wing,
+                    target_room,
+                    label,
+                )?;
+                Ok(serde_json::to_string(&json!({
+                    "success": true, "tunnel_id": id,
+                }))?)
+            }
+
+            // ── mempalace_list_tunnels ─────────────────────────────────────────
+            "mempalace_list_tunnels" => {
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let result = self.db.list_tunnels(wing)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_delete_tunnel ────────────────────────────────────────
+            "mempalace_delete_tunnel" => {
+                let tunnel_id = get_str(args, "tunnel_id")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: tunnel_id"))?;
+                self.db.delete_tunnel(tunnel_id)?;
+                Ok(serde_json::to_string(&json!({
+                    "success": true, "tunnel_id": tunnel_id,
+                }))?)
+            }
+
+            // ── mempalace_follow_tunnels ───────────────────────────────────────
+            "mempalace_follow_tunnels" => {
+                let wing = validate::sanitize_name_required(
+                    get_str(args, "wing")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: wing"))?,
+                    "wing",
+                )?;
+                let room = validate::sanitize_name_required(
+                    get_str(args, "room")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: room"))?,
+                    "room",
+                )?;
+                let result = self.db.follow_tunnels(wing, room)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_get_drawer ───────────────────────────────────────────
+            "mempalace_get_drawer" => {
+                let drawer_id = get_str(args, "drawer_id")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: drawer_id"))?;
+                let result = self.db.get_drawer(drawer_id)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_list_drawers ─────────────────────────────────────────
+            "mempalace_list_drawers" => {
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let room = validate::sanitize_name(get_str(args, "room"), "room")?;
+                let limit = get_i64(args, "limit").unwrap_or(20) as usize;
+                let limit = limit.clamp(1, 100);
+                let offset = get_i64(args, "offset").unwrap_or(0) as usize;
+                let result = self.db.list_drawers(wing, room, limit, offset)?;
+                Ok(serde_json::to_string(&result)?)
             }
 
             _ => Err(anyhow::anyhow!("UnknownTool: {name}")),
