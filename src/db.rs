@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, types::Value as SqlValue, Connection, OptionalExtension};
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -283,125 +283,32 @@ impl Database {
         self.fts_search(query, limit, wing, room)
     }
 
-    #[allow(dead_code)]
-    fn vector_search(
-        &self,
-        vec_bytes: &[u8],
-        limit: usize,
+    // ── filter clause builder (shared by all search functions) ─────────────────
+
+    /// Builds `AND d.wing = ?N AND d.room = ?M` clauses and collects param values.
+    /// Returns (sql_fragment, filter_params) where sql_fragment is empty when
+    /// both wing and room are None.
+    fn build_filter_clause(
         wing: Option<&str>,
         room: Option<&str>,
-    ) -> Result<Value> {
-        // sqlite-vec KNN query: fetch limit*4 then apply filters, cap at limit
-        let fetch = limit * 4;
-        let sql = match (wing, room) {
-            (Some(_), Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 AND d.wing = ?2 AND d.room = ?3
-                 ORDER BY v.distance"
-            ),
-            (Some(_), None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 AND d.wing = ?2
-                 ORDER BY v.distance"
-            ),
-            (None, Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 AND d.room = ?2
-                 ORDER BY v.distance"
-            ),
-            (None, None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 ORDER BY v.distance"
-            ),
-        };
-
-        let mut stmt = self.conn.prepare(&sql)?;
-        let mut results = Vec::new();
-
-        let rows: Vec<(String, String, String, String, f64)> = match (wing, room) {
-            (Some(w), Some(r)) => {
-                let mut rows_raw = stmt.query(params![vec_bytes, w, r])?;
-                let mut v = Vec::new();
-                while let Some(row) = rows_raw.next()? {
-                    v.push((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ));
-                }
-                v
-            }
-            (Some(w), None) => {
-                let mut rows_raw = stmt.query(params![vec_bytes, w])?;
-                let mut v = Vec::new();
-                while let Some(row) = rows_raw.next()? {
-                    v.push((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ));
-                }
-                v
-            }
-            (None, Some(r)) => {
-                let mut rows_raw = stmt.query(params![vec_bytes, r])?;
-                let mut v = Vec::new();
-                while let Some(row) = rows_raw.next()? {
-                    v.push((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ));
-                }
-                v
-            }
-            (None, None) => {
-                let mut rows_raw = stmt.query(params![vec_bytes])?;
-                let mut v = Vec::new();
-                while let Some(row) = rows_raw.next()? {
-                    v.push((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ));
-                }
-                v
-            }
-        };
-
-        for (id, w, r, content, distance) in rows.into_iter().take(limit) {
-            let similarity = 1.0 - (distance / 2.0);
-            results.push(json!({
-                "id": id,
-                "wing": w,
-                "room": r,
-                "content": content,
-                "rank": similarity,
-            }));
+        idx_start: usize,
+    ) -> (String, Vec<SqlValue>) {
+        let mut sql = String::new();
+        let mut params = Vec::new();
+        let mut idx = idx_start;
+        if let Some(w) = wing {
+            sql.push_str(&format!(" AND d.wing = ?{idx}"));
+            params.push(SqlValue::Text(w.to_string()));
+            idx += 1;
         }
-
-        Ok(Value::Array(results))
+        if let Some(r) = room {
+            sql.push_str(&format!(" AND d.room = ?{idx}"));
+            params.push(SqlValue::Text(r.to_string()));
+        }
+        (sql, params)
     }
+
+    // ── vector search ──────────────────────────────────────────────────────────
 
     fn vector_search_raw(
         &self,
@@ -410,95 +317,37 @@ impl Database {
         wing: Option<&str>,
         room: Option<&str>,
     ) -> Vec<(String, String, String, String, f64)> {
-        let sql = match (wing, room) {
-            (Some(_), Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 AND d.wing = ?2 AND d.room = ?3
-                 ORDER BY v.distance"
-            ),
-            (Some(_), None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 AND d.wing = ?2
-                 ORDER BY v.distance"
-            ),
-            (None, Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 AND d.room = ?2
-                 ORDER BY v.distance"
-            ),
-            (None, None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, v.distance
-                 FROM vec_drawers v
-                 JOIN drawers d ON v.rowid = d.rowid
-                 WHERE v.embedding MATCH ?1 AND k = {fetch}
-                 ORDER BY v.distance"
-            ),
-        };
+        let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let sql = format!(
+            "SELECT d.id, d.wing, d.room, d.content, v.distance
+             FROM vec_drawers v
+             JOIN drawers d ON v.rowid = d.rowid
+             WHERE v.embedding MATCH ?1 AND k = {fetch}{filter_sql}
+             ORDER BY v.distance"
+        );
 
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return vec![],
         };
 
-        match (wing, room) {
-            (Some(w), Some(r)) => stmt
-                .query_map(params![vec_bytes, w, r], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            (Some(w), None) => stmt
-                .query_map(params![vec_bytes, w], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            (None, Some(r)) => stmt
-                .query_map(params![vec_bytes, r], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            (None, None) => stmt
-                .query_map(params![vec_bytes], |row| {
-                    Ok((
-                        row.get(0)?,
-                        row.get(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        row.get(4)?,
-                    ))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-        }
+        let mut all_params = vec![SqlValue::Blob(vec_bytes.to_vec())];
+        all_params.extend(filter_params);
+
+        stmt.query_map(
+            rusqlite::params_from_iter(all_params.iter()),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
 
     fn fts_search(
@@ -509,93 +358,39 @@ impl Database {
         room: Option<&str>,
     ) -> Result<Value> {
         let safe_query = sanitize_fts_query(query);
-
-        let sql = match (wing, room) {
-            (Some(_), Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, rank
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1 AND d.wing = ?2 AND d.room = ?3
-                 ORDER BY rank LIMIT {limit}"
-            ),
-            (Some(_), None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, rank
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1 AND d.wing = ?2
-                 ORDER BY rank LIMIT {limit}"
-            ),
-            (None, Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, rank
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1 AND d.room = ?2
-                 ORDER BY rank LIMIT {limit}"
-            ),
-            (None, None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content, rank
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1
-                 ORDER BY rank LIMIT {limit}"
-            ),
-        };
+        let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let sql = format!(
+            "SELECT d.id, d.wing, d.room, d.content, rank
+             FROM drawers_fts
+             JOIN drawers d ON drawers_fts.rowid = d.rowid
+             WHERE drawers_fts MATCH ?1{filter_sql}
+             ORDER BY rank LIMIT {limit}"
+        );
 
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return Ok(Value::Array(vec![])),
         };
 
+        let mut all_params = vec![SqlValue::Text(safe_query)];
+        all_params.extend(filter_params);
+
+        let rows_result: rusqlite::Result<Vec<(String, String, String, String, f64)>> = stmt
+            .query_map(
+                rusqlite::params_from_iter(all_params.iter()),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .and_then(|iter| iter.collect());
+
         let mut results = Vec::new();
-
-        let rows_result: rusqlite::Result<Vec<(String, String, String, String, f64)>> =
-            match (wing, room) {
-                (Some(w), Some(r)) => stmt
-                    .query_map(params![safe_query, w, r], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    })
-                    .and_then(|iter| iter.collect()),
-                (Some(w), None) => stmt
-                    .query_map(params![safe_query, w], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    })
-                    .and_then(|iter| iter.collect()),
-                (None, Some(r)) => stmt
-                    .query_map(params![safe_query, r], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    })
-                    .and_then(|iter| iter.collect()),
-                (None, None) => stmt
-                    .query_map(params![safe_query], |row| {
-                        Ok((
-                            row.get(0)?,
-                            row.get(1)?,
-                            row.get(2)?,
-                            row.get(3)?,
-                            row.get(4)?,
-                        ))
-                    })
-                    .and_then(|iter| iter.collect()),
-            };
-
         if let Ok(rows) = rows_result {
             for (id, w, r, content, rank) in rows {
                 results.push(json!({
@@ -619,69 +414,36 @@ impl Database {
         room: Option<&str>,
     ) -> Vec<(String, String, String, String)> {
         let safe_query = sanitize_fts_query(query);
-
-        let sql = match (wing, room) {
-            (Some(_), Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1 AND d.wing = ?2 AND d.room = ?3
-                 ORDER BY rank LIMIT {fetch}"
-            ),
-            (Some(_), None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1 AND d.wing = ?2
-                 ORDER BY rank LIMIT {fetch}"
-            ),
-            (None, Some(_)) => format!(
-                "SELECT d.id, d.wing, d.room, d.content
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1 AND d.room = ?2
-                 ORDER BY rank LIMIT {fetch}"
-            ),
-            (None, None) => format!(
-                "SELECT d.id, d.wing, d.room, d.content
-                 FROM drawers_fts
-                 JOIN drawers d ON drawers_fts.rowid = d.rowid
-                 WHERE drawers_fts MATCH ?1
-                 ORDER BY rank LIMIT {fetch}"
-            ),
-        };
+        let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let sql = format!(
+            "SELECT d.id, d.wing, d.room, d.content
+             FROM drawers_fts
+             JOIN drawers d ON drawers_fts.rowid = d.rowid
+             WHERE drawers_fts MATCH ?1{filter_sql}
+             ORDER BY rank LIMIT {fetch}"
+        );
 
         let mut stmt = match self.conn.prepare(&sql) {
             Ok(s) => s,
             Err(_) => return vec![],
         };
 
-        match (wing, room) {
-            (Some(w), Some(r)) => stmt
-                .query_map(params![safe_query, w, r], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            (Some(w), None) => stmt
-                .query_map(params![safe_query, w], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            (None, Some(r)) => stmt
-                .query_map(params![safe_query, r], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-            (None, None) => stmt
-                .query_map(params![safe_query], |row| {
-                    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-                })
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-                .unwrap_or_default(),
-        }
+        let mut all_params = vec![SqlValue::Text(safe_query)];
+        all_params.extend(filter_params);
+
+        stmt.query_map(
+            rusqlite::params_from_iter(all_params.iter()),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                ))
+            },
+        )
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
     }
 
     fn search_hybrid(
@@ -1151,6 +913,322 @@ impl Database {
             "entries": entries,
             "total": total,
             "showing": entries.len() as i64,
+        }))
+    }
+
+    // ── graph tools ────────────────────────────────────────────────────────────
+
+    pub fn traverse(&self, start_room: &str, max_hops: usize) -> Result<Value> {
+        use std::collections::{HashMap, HashSet};
+
+        #[derive(Default)]
+        struct RoomData {
+            wings: Vec<String>,
+            count: i64,
+        }
+        let mut room_map: HashMap<String, RoomData> = HashMap::new();
+
+        {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT room, wing, COUNT(*) as cnt FROM drawers GROUP BY room, wing")?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let room: String = row.get(0)?;
+                let wing: String = row.get(1)?;
+                let cnt: i64 = row.get(2)?;
+                let entry = room_map.entry(room).or_default();
+                entry.wings.push(wing);
+                entry.count += cnt;
+            }
+        }
+
+        if !room_map.contains_key(start_room) {
+            let query_lower = start_room.to_lowercase();
+            let suggestions: Vec<&str> = room_map
+                .keys()
+                .filter(|k| k.to_lowercase().contains(&query_lower))
+                .take(5)
+                .map(|s| s.as_str())
+                .collect();
+            return Ok(json!({
+                "error": format!("Room '{start_room}' not found"),
+                "suggestions": suggestions,
+            }));
+        }
+
+        struct ResultEntry {
+            room: String,
+            wings: Vec<String>,
+            count: i64,
+            hop: usize,
+        }
+
+        let mut results: Vec<ResultEntry> = Vec::new();
+        let start_data = &room_map[start_room];
+        results.push(ResultEntry {
+            room: start_room.to_string(),
+            wings: start_data.wings.clone(),
+            count: start_data.count,
+            hop: 0,
+        });
+
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(start_room.to_string());
+
+        let mut frontier: Vec<(String, usize)> = vec![(start_room.to_string(), 0)];
+        let mut fi = 0;
+
+        while fi < frontier.len() {
+            let (current_room, depth) = frontier[fi].clone();
+            fi += 1;
+            if depth >= max_hops {
+                continue;
+            }
+
+            let current_wings: HashSet<&str> = room_map[current_room.as_str()]
+                .wings
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+
+            for (candidate, data) in &room_map {
+                if visited.contains(candidate) {
+                    continue;
+                }
+                let shared = data
+                    .wings
+                    .iter()
+                    .any(|w| current_wings.contains(w.as_str()));
+                if !shared {
+                    continue;
+                }
+                visited.insert(candidate.clone());
+                results.push(ResultEntry {
+                    room: candidate.clone(),
+                    wings: data.wings.clone(),
+                    count: data.count,
+                    hop: depth + 1,
+                });
+                if depth + 1 < max_hops {
+                    frontier.push((candidate.clone(), depth + 1));
+                }
+            }
+        }
+
+        results.sort_by(|a, b| a.hop.cmp(&b.hop).then_with(|| b.count.cmp(&a.count)));
+
+        let cap = results.len().min(50);
+        let connections: Vec<Value> = results[..cap]
+            .iter()
+            .map(|re| {
+                json!({
+                    "room": re.room,
+                    "wings": re.wings,
+                    "count": re.count,
+                    "hop": re.hop,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "start_room": start_room,
+            "connections": connections,
+            "rooms_visited": results.len() as i64,
+        }))
+    }
+
+    pub fn find_tunnels(&self, wing_a: Option<&str>, wing_b: Option<&str>) -> Result<Value> {
+        use std::collections::{HashMap, HashSet};
+
+        struct RoomInfo {
+            wings: HashSet<String>,
+            count: i64,
+            recent: String,
+        }
+        let mut room_map: HashMap<String, RoomInfo> = HashMap::new();
+
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT room, wing, COUNT(*) as cnt, MAX(filed_at) as recent
+                 FROM drawers GROUP BY room, wing",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let room: String = row.get(0)?;
+                let wing: String = row.get(1)?;
+                let cnt: i64 = row.get(2)?;
+                let recent: Option<String> = row.get(3)?;
+                let recent = recent.unwrap_or_default();
+                let entry = room_map.entry(room).or_insert_with(|| RoomInfo {
+                    wings: HashSet::new(),
+                    count: 0,
+                    recent: String::new(),
+                });
+                entry.wings.insert(wing);
+                entry.count += cnt;
+                if recent > entry.recent {
+                    entry.recent = recent;
+                }
+            }
+        }
+
+        struct TunnelEntry {
+            room: String,
+            wings: Vec<String>,
+            count: i64,
+            recent: String,
+        }
+        let mut tunnels: Vec<TunnelEntry> = Vec::new();
+
+        for (room, ri) in &room_map {
+            if ri.wings.len() < 2 {
+                continue;
+            }
+            if let Some(wa) = wing_a {
+                if !ri.wings.contains(wa) {
+                    continue;
+                }
+            }
+            if let Some(wb) = wing_b {
+                if !ri.wings.contains(wb) {
+                    continue;
+                }
+            }
+            let mut wings_sorted: Vec<String> = ri.wings.iter().cloned().collect();
+            wings_sorted.sort();
+            tunnels.push(TunnelEntry {
+                room: room.clone(),
+                wings: wings_sorted,
+                count: ri.count,
+                recent: ri.recent.clone(),
+            });
+        }
+
+        tunnels.sort_by_key(|t| std::cmp::Reverse(t.count));
+        let cap = tunnels.len().min(50);
+
+        let items: Vec<Value> = tunnels[..cap]
+            .iter()
+            .map(|t| {
+                json!({
+                    "room": t.room,
+                    "wings": t.wings,
+                    "count": t.count,
+                    "recent": t.recent,
+                })
+            })
+            .collect();
+
+        let mut result = json!({"tunnels": items});
+        if let Some(wa) = wing_a {
+            result["wing_a"] = json!(wa);
+        }
+        if let Some(wb) = wing_b {
+            result["wing_b"] = json!(wb);
+        }
+        Ok(result)
+    }
+
+    pub fn graph_stats(&self) -> Result<Value> {
+        use std::collections::{HashMap, HashSet};
+
+        struct RoomWings {
+            wings: HashSet<String>,
+            count: i64,
+        }
+        let mut room_map: HashMap<String, RoomWings> = HashMap::new();
+
+        {
+            let mut stmt = self.conn.prepare(
+                "SELECT room, wing, COUNT(*) as cnt FROM drawers WHERE room != 'general' GROUP BY room, wing",
+            )?;
+            let mut rows = stmt.query([])?;
+            while let Some(row) = rows.next()? {
+                let room: String = row.get(0)?;
+                let wing: String = row.get(1)?;
+                let cnt: i64 = row.get(2)?;
+                let entry = room_map.entry(room).or_insert_with(|| RoomWings {
+                    wings: HashSet::new(),
+                    count: 0,
+                });
+                entry.wings.insert(wing);
+                entry.count += cnt;
+            }
+        }
+
+        let total_rooms = room_map.len() as i64;
+
+        let mut all_wings: HashSet<String> = HashSet::new();
+        for rw in room_map.values() {
+            for w in &rw.wings {
+                all_wings.insert(w.clone());
+            }
+        }
+        let total_wings = all_wings.len() as i64;
+
+        let total_drawers = self.get_drawer_count();
+
+        let mut tunnel_rooms: i64 = 0;
+        let mut total_edges: i64 = 0;
+        for rw in room_map.values() {
+            let n = rw.wings.len() as i64;
+            if n >= 2 {
+                tunnel_rooms += 1;
+                total_edges += n * (n - 1) / 2;
+            }
+        }
+
+        let mut rooms_per_wing: HashMap<String, i64> = HashMap::new();
+        for rw in room_map.values() {
+            for w in &rw.wings {
+                *rooms_per_wing.entry(w.clone()).or_default() += 1;
+            }
+        }
+        let rooms_per_wing_val: serde_json::Map<String, Value> = rooms_per_wing
+            .into_iter()
+            .map(|(k, v)| (k, json!(v)))
+            .collect();
+
+        struct TopTunnel {
+            room: String,
+            wings: Vec<String>,
+            count: i64,
+        }
+        let mut top: Vec<TopTunnel> = room_map
+            .iter()
+            .filter(|(_, rw)| rw.wings.len() >= 2)
+            .map(|(room, rw)| {
+                let mut ws: Vec<String> = rw.wings.iter().cloned().collect();
+                ws.sort();
+                TopTunnel {
+                    room: room.clone(),
+                    wings: ws,
+                    count: rw.count,
+                }
+            })
+            .collect();
+        top.sort_by_key(|t| std::cmp::Reverse(t.wings.len()));
+        let top_cap = top.len().min(10);
+        let top_arr: Vec<Value> = top[..top_cap]
+            .iter()
+            .map(|tt| {
+                json!({
+                    "room": tt.room,
+                    "wings": tt.wings,
+                    "count": tt.count,
+                })
+            })
+            .collect();
+
+        Ok(json!({
+            "total_rooms": total_rooms,
+            "total_wings": total_wings,
+            "total_drawers": total_drawers,
+            "tunnel_rooms": tunnel_rooms,
+            "total_edges": total_edges,
+            "rooms_per_wing": rooms_per_wing_val,
+            "top_tunnels": top_arr,
         }))
     }
 }
@@ -1840,5 +1918,134 @@ mod tests {
         // Old text should not match
         let old_results = db.search("old text", 5, None, None, None).unwrap();
         assert!(old_results.as_array().unwrap().is_empty());
+    }
+
+    // ── graph tools ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_traverse_existing_room() {
+        let (_dir, db) = test_db();
+        // Add drawers in the same wing, different rooms
+        db.add_drawer("wing_a", "room-start", "content", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_a", "room-alpha", "content", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_a", "room-beta", "content", None, "test", None)
+            .unwrap();
+        let result = db.traverse("room-start", 2).unwrap();
+        let connections = result["connections"].as_array().unwrap();
+        assert!(!connections.is_empty());
+        // Start room should be at hop 0
+        assert_eq!(connections[0]["room"], "room-start");
+        assert_eq!(connections[0]["hop"], 0);
+    }
+
+    #[test]
+    fn test_traverse_missing_room() {
+        let (_dir, db) = test_db();
+        let result = db.traverse("nonexistent-room", 2).unwrap();
+        assert!(result["error"].as_str().is_some());
+        assert!(result["suggestions"].as_array().is_some());
+    }
+
+    #[test]
+    fn test_traverse_respects_max_hops() {
+        let (_dir, db) = test_db();
+        // wing_a → rooms A,B,C  |  wing_b → rooms B,D  |  wing_c → rooms D,E,F
+        db.add_drawer("wing_a", "room-a", "x", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_a", "room-b", "x", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_a", "room-c", "x", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_b", "room-b", "x", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_b", "room-d", "x", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_c", "room-d", "x", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_c", "room-e", "x", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_c", "room-f", "x", None, "test", None)
+            .unwrap();
+
+        // max_hops=1: room-a → room-b, room-c only (shared wing_a)
+        let r1 = db.traverse("room-a", 1).unwrap();
+        for conn in r1["connections"].as_array().unwrap() {
+            assert!(conn["hop"].as_u64().unwrap() <= 1);
+        }
+
+        // max_hops=3: should reach room-e via room-a→room-b→room-d→room-e
+        let r3 = db.traverse("room-a", 3).unwrap();
+        let rooms: Vec<&str> = r3["connections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["room"].as_str().unwrap())
+            .collect();
+        assert!(rooms.contains(&"room-e"));
+    }
+
+    #[test]
+    fn test_find_tunnels_between_two_wings() {
+        let (_dir, db) = test_db();
+        // room shared by wing_a AND wing_b
+        db.add_drawer("wing_a", "bridge-room", "c", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_b", "bridge-room", "c", None, "test", None)
+            .unwrap();
+        // room only in wing_a
+        db.add_drawer("wing_a", "solo-room", "c", None, "test", None)
+            .unwrap();
+
+        let result = db.find_tunnels(Some("wing_a"), Some("wing_b")).unwrap();
+        let tunnels = result["tunnels"].as_array().unwrap();
+        assert_eq!(tunnels.len(), 1);
+        assert_eq!(tunnels[0]["room"], "bridge-room");
+    }
+
+    #[test]
+    fn test_find_tunnels_no_filter() {
+        let (_dir, db) = test_db();
+        db.add_drawer("wing_a", "shared", "c", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_b", "shared", "c", None, "test", None)
+            .unwrap();
+
+        let result = db.find_tunnels(None, None).unwrap();
+        let tunnels = result["tunnels"].as_array().unwrap();
+        assert!(!tunnels.is_empty());
+    }
+
+    #[test]
+    fn test_find_tunnels_no_matches() {
+        let (_dir, db) = test_db();
+        db.add_drawer("wing_a", "only-room", "c", None, "test", None)
+            .unwrap();
+
+        let result = db.find_tunnels(Some("wing_x"), Some("wing_y")).unwrap();
+        let tunnels = result["tunnels"].as_array().unwrap();
+        assert!(tunnels.is_empty());
+    }
+
+    #[test]
+    fn test_graph_stats() {
+        let (_dir, db) = test_db();
+        db.add_drawer("wing_a", "room1", "c", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_a", "room2", "c", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_b", "room1", "c", None, "test", None)
+            .unwrap();
+
+        let stats = db.graph_stats().unwrap();
+        assert!(stats["total_rooms"].as_i64().unwrap() > 0);
+        assert!(stats["total_wings"].as_i64().unwrap() > 0);
+        assert!(stats["total_drawers"].as_i64().unwrap() > 0);
+        // room1 appears in both wings → is a tunnel
+        assert!(stats["tunnel_rooms"].as_i64().unwrap() >= 1);
+        assert!(stats["total_edges"].as_i64().unwrap() >= 1);
+        assert!(stats["rooms_per_wing"].as_object().is_some());
+        assert!(stats["top_tunnels"].as_array().is_some());
     }
 }
