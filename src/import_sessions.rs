@@ -8,19 +8,44 @@ use crate::log::log;
 /// Import OpenCode sessions from opencode.db into the palace.
 /// Each session becomes one drawer: wing="opencode", room=slugified title.
 /// Content = timestamp + title + directory + tool summary + first message + assistant text.
+/// Pass full=true to re-import all sessions; default is incremental (only new/changed).
 pub fn import_sessions(
     db: &Database,
     oc_db_path: &str,
     embedder: Option<&Embedder>,
+    full: bool,
 ) -> Result<usize> {
     let oc = Connection::open(oc_db_path)?;
 
     let max_chars = session_max_chars();
+    let source_key = "opencode_sessions";
 
-    // Fetch all sessions with time_updated
-    let mut stmt = oc.prepare(
-        "SELECT id, title, directory, time_updated FROM session ORDER BY time_updated DESC",
-    )?;
+    // Determine cutoff for incremental sync
+    let since: Option<i64> = if full {
+        None
+    } else {
+        let last = db.get_sync_state(source_key);
+        if last > 0 {
+            Some(last)
+        } else {
+            None
+        }
+    };
+
+    // Fetch sessions, optionally filtered by time_updated
+    let (sql, params_slice): (&str, Vec<rusqlite::types::Value>) = if let Some(s) = since {
+        (
+            "SELECT id, title, directory, time_updated FROM session WHERE time_updated > ?1 ORDER BY time_updated DESC",
+            vec![rusqlite::types::Value::Integer(s)],
+        )
+    } else {
+        (
+            "SELECT id, title, directory, time_updated FROM session ORDER BY time_updated DESC",
+            vec![],
+        )
+    };
+
+    let mut stmt = oc.prepare(sql)?;
 
     struct SessionRow {
         id: String,
@@ -30,7 +55,7 @@ pub fn import_sessions(
     }
 
     let sessions: Vec<SessionRow> = stmt
-        .query_map([], |row| {
+        .query_map(rusqlite::params_from_iter(params_slice.iter()), |row| {
             Ok(SessionRow {
                 id: row.get(0)?,
                 title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
@@ -41,18 +66,13 @@ pub fn import_sessions(
         .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut count = 0usize;
+    let mut max_ts: i64 = since.unwrap_or(0);
 
     for session in &sessions {
         let text_parts = collect_assistant_text(&oc, &session.id, max_chars);
-
-        // Convert millis timestamp to ISO datetime for filed_at
         let filed_at = millis_to_dt(session.time_updated);
 
-        // Build content
-        let ts_line = format!(
-            "Date: {}",
-            millis_to_dt(session.time_updated)
-        );
+        let ts_line = format!("Date: {}", millis_to_dt(session.time_updated));
         let title_line = if session.title.is_empty() {
             format!("Session: {}", &session.id[..session.id.len().min(16)])
         } else {
@@ -94,7 +114,6 @@ pub fn import_sessions(
             content.push_str(&text_parts);
         }
 
-        // Room = slugified title (or session id prefix)
         let room = if session.title.is_empty() {
             format!("session-{}", &session.id[..session.id.len().min(8)])
         } else {
@@ -115,6 +134,15 @@ pub fn import_sessions(
             Ok(_) => count += 1,
             Err(e) => log!("warn", "skipping session {}: {e}", session.id),
         }
+
+        if session.time_updated > max_ts {
+            max_ts = session.time_updated;
+        }
+    }
+
+    // Record the max timestamp for next incremental sync
+    if max_ts > since.unwrap_or(0) {
+        db.set_sync_state(source_key, max_ts)?;
     }
 
     Ok(count)

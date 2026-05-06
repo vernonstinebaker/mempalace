@@ -58,7 +58,7 @@ fn main() {
         }
 
         "index-sessions" => {
-            // index-sessions [--db <path>]
+            // index-sessions [--db <path>] [--full]
             let oc_db_path = if let Some(pos) = args.iter().position(|a| a == "--db") {
                 args.get(pos + 1)
                     .cloned()
@@ -67,12 +67,14 @@ fn main() {
                 let home = std::env::var("HOME").unwrap_or_default();
                 format!("{home}/.local/share/opencode/opencode.db")
             };
+            let full = args.iter().any(|a| a == "--full");
             let palace_dir = get_palace_dir();
             let db = db::Database::open(&palace_dir).expect("Failed to open database");
             let embedder = embed::try_load_embedder();
             log!("info", "Importing sessions from: {oc_db_path}");
-            let count = import_sessions::import_sessions(&db, &oc_db_path, embedder.as_ref())
-                .expect("Session import failed");
+            let count =
+                import_sessions::import_sessions(&db, &oc_db_path, embedder.as_ref(), full)
+                    .expect("Session import failed");
             println!("Imported {count} sessions");
         }
 

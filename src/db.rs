@@ -86,6 +86,14 @@ impl Database {
             "CREATE TABLE IF NOT EXISTS vec_embedded (rowid INTEGER PRIMARY KEY);",
         )?;
 
+        // Track import state for incremental syncs
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS sync_state (
+                source TEXT PRIMARY KEY,
+                last_time_updated INTEGER NOT NULL
+            );",
+        )?;
+
         Ok(())
     }
 
@@ -95,6 +103,29 @@ impl Database {
         self.conn
             .query_row("SELECT COUNT(*) FROM drawers", [], |r| r.get(0))
             .unwrap_or(0)
+    }
+
+    // ── sync state ────────────────────────────────────────────────────────────
+
+    /// Get the last imported timestamp for a sync source.
+    /// Returns 0 if never imported.
+    pub fn get_sync_state(&self, source: &str) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT last_time_updated FROM sync_state WHERE source = ?1",
+                params![source],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+    }
+
+    /// Record the last imported timestamp for a sync source.
+    pub fn set_sync_state(&self, source: &str, last_time_updated: i64) -> Result<()> {
+        self.conn.execute(
+            "INSERT OR REPLACE INTO sync_state (source, last_time_updated) VALUES (?1, ?2)",
+            params![source, last_time_updated],
+        )?;
+        Ok(())
     }
 
     // ── wing / room queries ───────────────────────────────────────────────────
@@ -2388,5 +2419,28 @@ mod tests {
         let arr = results.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["id"], "new");
+    }
+
+    // ── sync state ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sync_state_default() {
+        let (_dir, db) = test_db();
+        assert_eq!(db.get_sync_state("test_source"), 0);
+    }
+
+    #[test]
+    fn test_sync_state_set_and_get() {
+        let (_dir, db) = test_db();
+        db.set_sync_state("test_source", 1234567890).unwrap();
+        assert_eq!(db.get_sync_state("test_source"), 1234567890);
+    }
+
+    #[test]
+    fn test_sync_state_replace() {
+        let (_dir, db) = test_db();
+        db.set_sync_state("test_source", 100).unwrap();
+        db.set_sync_state("test_source", 200).unwrap();
+        assert_eq!(db.get_sync_state("test_source"), 200);
     }
 }

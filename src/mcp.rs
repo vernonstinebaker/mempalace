@@ -64,7 +64,8 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_bulk_replace","description":"Find-and-replace a string across ALL drawer content in the palace. Returns count of updated drawers. Useful for bulk corrections like renamed paths, people, or projects.","inputSchema":{"type":"object","properties":{"find":{"type":"string","description":"Exact string to find"},"replace":{"type":"string","description":"String to replace it with"},"wing":{"type":"string","description":"Limit to this wing only (optional)"}},"required":["find","replace"]}},"#,
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}},"#,
-    r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"}}}},{"name":"mempalace_list_recent","description":"List recently filed content, ordered by filed_at descending. Use this when you need to know what's new.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max results (default 20)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"since":{"type":"string","description":"Only entries filed after this ISO datetime"}}}}"#,
+    r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable. Defaults to incremental (only new sessions). Use full=true to re-import all.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
+    r#"{"name":"mempalace_list_recent","description":"List recently filed content, ordered by filed_at descending. Use this when you need to know what's new.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max results (default 20)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"since":{"type":"string","description":"Only entries filed after this ISO datetime"}}}}"#,
     "]"
 );
 
@@ -506,14 +507,22 @@ impl<'a> Server<'a> {
             // ── mempalace_import_sessions ─────────────────────────────────────
             "mempalace_import_sessions" => {
                 let oc_db_path = get_str(args, "oc_db_path").unwrap_or("");
+                let full = args
+                    .get("full")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
                 let path = if oc_db_path.is_empty() {
                     let home = std::env::var("HOME").unwrap_or_default();
                     format!("{home}/.local/share/opencode/opencode.db")
                 } else {
                     oc_db_path.to_string()
                 };
-                let count =
-                    import_sessions::import_sessions(self.db, &path, self.embedder.as_ref())?;
+                let count = import_sessions::import_sessions(
+                    self.db,
+                    &path,
+                    self.embedder.as_ref(),
+                    full,
+                )?;
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "imported": count,
