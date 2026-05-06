@@ -7,7 +7,7 @@ use crate::log::log;
 
 /// Import OpenCode sessions from opencode.db into the palace.
 /// Each session becomes one drawer: wing="opencode", room=slugified title.
-/// Content = title + directory + recent assistant text (up to ~2000 chars).
+/// Content = timestamp + title + directory + tool summary + first message + assistant text.
 pub fn import_sessions(
     db: &Database,
     oc_db_path: &str,
@@ -15,14 +15,18 @@ pub fn import_sessions(
 ) -> Result<usize> {
     let oc = Connection::open(oc_db_path)?;
 
-    // Fetch all sessions
-    let mut stmt =
-        oc.prepare("SELECT id, title, directory FROM session ORDER BY time_updated DESC")?;
+    let max_chars = session_max_chars();
+
+    // Fetch all sessions with time_updated
+    let mut stmt = oc.prepare(
+        "SELECT id, title, directory, time_updated FROM session ORDER BY time_updated DESC",
+    )?;
 
     struct SessionRow {
         id: String,
         title: String,
         directory: String,
+        time_updated: i64,
     }
 
     let sessions: Vec<SessionRow> = stmt
@@ -31,6 +35,7 @@ pub fn import_sessions(
                 id: row.get(0)?,
                 title: row.get::<_, Option<String>>(1)?.unwrap_or_default(),
                 directory: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                time_updated: row.get(3)?,
             })
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -38,10 +43,16 @@ pub fn import_sessions(
     let mut count = 0usize;
 
     for session in &sessions {
-        // Collect recent assistant text parts for this session (up to 2000 chars)
-        let text_parts = collect_assistant_text(&oc, &session.id, 2000);
+        let text_parts = collect_assistant_text(&oc, &session.id, max_chars);
+
+        // Convert millis timestamp to ISO datetime for filed_at
+        let filed_at = millis_to_dt(session.time_updated);
 
         // Build content
+        let ts_line = format!(
+            "Date: {}",
+            millis_to_dt(session.time_updated)
+        );
         let title_line = if session.title.is_empty() {
             format!("Session: {}", &session.id[..session.id.len().min(16)])
         } else {
@@ -54,19 +65,34 @@ pub fn import_sessions(
             format!("Directory: {}", session.directory)
         };
 
-        let content = if text_parts.is_empty() {
-            if dir_line.is_empty() {
-                title_line
-            } else {
-                format!("{title_line}\n{dir_line}")
-            }
-        } else {
-            if dir_line.is_empty() {
-                format!("{title_line}\n\n{text_parts}")
-            } else {
-                format!("{title_line}\n{dir_line}\n\n{text_parts}")
-            }
-        };
+        let tool_line = collect_tool_names(&oc, &session.id);
+        let first_msg = collect_first_user_message(&oc, &session.id);
+        let summary = session_summary(&oc, &session.id);
+
+        let mut content = String::new();
+        content.push_str(&title_line);
+        content.push('\n');
+        content.push_str(&ts_line);
+        if !dir_line.is_empty() {
+            content.push('\n');
+            content.push_str(&dir_line);
+        }
+        if !tool_line.is_empty() {
+            content.push('\n');
+            content.push_str(&tool_line);
+        }
+        if let Some(ref msg) = first_msg {
+            content.push('\n');
+            content.push_str(msg);
+        }
+        if !summary.is_empty() {
+            content.push('\n');
+            content.push_str(&summary);
+        }
+        if !text_parts.is_empty() {
+            content.push('\n');
+            content.push_str(&text_parts);
+        }
 
         // Room = slugified title (or session id prefix)
         let room = if session.title.is_empty() {
@@ -75,8 +101,6 @@ pub fn import_sessions(
             slugify(&session.title)
         };
 
-        // Use session_id as stable drawer ID (not content hash) so that re-indexing
-        // the same session after it has grown doesn't create a duplicate drawer.
         let drawer_id = format!("oc_session_{}", &session.id);
         match db.upsert_drawer(
             &drawer_id,
@@ -85,6 +109,7 @@ pub fn import_sessions(
             &content,
             None,
             "import-sessions",
+            Some(&filed_at),
             embedder,
         ) {
             Ok(_) => count += 1,
@@ -95,13 +120,120 @@ pub fn import_sessions(
     Ok(count)
 }
 
+/// Convert millisecond unix timestamp to "YYYY-MM-DD HH:MM:SS"
+fn millis_to_dt(millis: i64) -> String {
+    let secs = millis / 1000;
+    let days = secs / 86400;
+    // Simple conversion: days since epoch
+    let year = 1970 + (days as f64 / 365.25) as i32;
+    let day_of_year = days - ((year - 1970) as i64 * 365 + ((year - 1969) / 4) as i64);
+    let month_days = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+    let mut month = 1;
+    let mut remaining = day_of_year;
+    for (i, md) in month_days.iter().enumerate() {
+        let mdays = if i == 1 && year % 4 == 0 && (year % 100 != 0 || year % 400 == 0) {
+            29
+        } else {
+            *md
+        } as i64;
+        if remaining < mdays {
+            month = i + 1;
+            break;
+        }
+        remaining -= mdays;
+        month = i + 1;
+    }
+    let day = remaining + 1;
+    let time = secs % 86400;
+    let hour = time / 3600;
+    let min = (time % 3600) / 60;
+    let sec = time % 60;
+    format!("{year:04}-{month:02}-{day:02} {hour:02}:{min:02}:{sec:02}")
+}
+
+fn session_max_chars() -> usize {
+    std::env::var("MEMPALACE_SESSION_MAX_CHARS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3000)
+}
+
+/// Collect tool names used in the session.
+fn collect_tool_names(conn: &Connection, session_id: &str) -> String {
+    let sql = "SELECT DISTINCT json_extract(p.data, '$.name') FROM part p
+               JOIN message m ON p.message_id = m.id
+               WHERE p.session_id = ?1
+               AND json_extract(m.data, '$.role') = 'assistant'
+               AND json_extract(p.data, '$.type') = 'tool_use'
+               AND json_extract(p.data, '$.name') IS NOT NULL
+               ORDER BY 1";
+
+    let names: Vec<String> = match conn.prepare(sql) {
+        Ok(mut stmt) => stmt
+            .query_map(params![session_id], |r| r.get::<_, Option<String>>(0))
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).filter_map(|n| n).collect())
+            .unwrap_or_default(),
+        Err(_) => return String::new(),
+    };
+
+    if names.is_empty() {
+        return String::new();
+    }
+    format!("Used tools: {}", names.join(", "))
+}
+
+/// Get the first user message for session context.
+fn collect_first_user_message(conn: &Connection, session_id: &str) -> Option<String> {
+    let sql = "SELECT p.data FROM part p
+               JOIN message m ON p.message_id = m.id
+               WHERE p.session_id = ?1
+               AND json_extract(m.data, '$.role') = 'user'
+               AND json_extract(p.data, '$.type') = 'text'
+               ORDER BY p.rowid ASC LIMIT 1";
+
+    let data: Option<String> = conn
+        .prepare(sql)
+        .ok()
+        .and_then(|mut s| s.query_row(params![session_id], |r| r.get(0)).ok());
+
+    data.and_then(|part_json| {
+        let v = serde_json::from_str::<serde_json::Value>(&part_json).ok()?;
+        let text = v.get("text")?.as_str()?;
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            let truncated: String = trimmed.chars().take(200).collect();
+            Some(format!("First message: {truncated}"))
+        }
+    })
+}
+
+/// Build a summary line with message and part counts.
+fn session_summary(conn: &Connection, session_id: &str) -> String {
+    let msg_count: i64 = conn
+        .prepare("SELECT COUNT(*) FROM message WHERE session_id = ?1")
+        .ok()
+        .and_then(|mut s| s.query_row(params![session_id], |r| r.get(0)).ok())
+        .unwrap_or(0);
+
+    let part_count: i64 = conn
+        .prepare("SELECT COUNT(*) FROM part WHERE session_id = ?1")
+        .ok()
+        .and_then(|mut s| s.query_row(params![session_id], |r| r.get(0)).ok())
+        .unwrap_or(0);
+
+    if msg_count == 0 && part_count == 0 {
+        return String::new();
+    }
+    format!("Messages: {msg_count}, Parts: {part_count}")
+}
+
 /// Collect text snippets from a session: first ~half from the start (establishes topic),
 /// last ~half from the end (shows outcome). This way even long sessions that drifted
 /// topic have both context represented.
 fn collect_assistant_text(conn: &Connection, session_id: &str, max_chars: usize) -> String {
-    // All assistant text parts for this session, chronological order.
-    // Join through message to filter role='assistant' and type='text' only —
-    // excludes user prompts, tool calls, patches, reasoning tokens, etc.
     let sql = "SELECT p.data FROM part p
                JOIN message m ON p.message_id = m.id
                WHERE p.session_id = ?1
@@ -121,7 +253,6 @@ fn collect_assistant_text(conn: &Connection, session_id: &str, max_chars: usize)
         }
     };
 
-    // Extract text content — SQL already filtered for type='text', just get $.text
     let texts: Vec<String> = all_parts
         .iter()
         .filter_map(|part_json| {
@@ -140,8 +271,6 @@ fn collect_assistant_text(conn: &Connection, session_id: &str, max_chars: usize)
         return String::new();
     }
 
-    // Take up to half from the start, up to half from the end
-    // (deduplicating if the session is short enough to fit entirely)
     let half = max_chars / 2;
     let mut head = String::new();
     for t in &texts {
@@ -168,9 +297,7 @@ fn collect_assistant_text(conn: &Connection, session_id: &str, max_chars: usize)
         tail.insert_str(0, &chunk);
     }
 
-    // Combine: if head and tail overlap (short session), just use head
     if head.len() + tail.len() <= max_chars {
-        // Short session — head already has everything, append tail only if distinct
         if tail.trim() == head.trim() || tail.is_empty() {
             head
         } else {
@@ -264,5 +391,32 @@ mod tests {
     #[test]
     fn test_slugify_mixed_case_and_numbers() {
         assert_eq!(slugify("TestRoom42"), "testroom42");
+    }
+
+    #[test]
+    fn test_millis_to_dt_basic() {
+        // 2026-05-05 18:08:06 UTC is approximately 1777975686000 ms
+        let dt = millis_to_dt(1777975686000);
+        assert!(dt.starts_with("2026-05-"));
+        assert!(dt.contains(":"));
+    }
+
+    #[test]
+    fn test_millis_to_dt_epoch() {
+        let dt = millis_to_dt(0);
+        assert_eq!(dt, "1970-01-01 00:00:00");
+    }
+
+    #[test]
+    fn test_session_max_chars_default() {
+        std::env::remove_var("MEMPALACE_SESSION_MAX_CHARS");
+        assert_eq!(session_max_chars(), 3000);
+    }
+
+    #[test]
+    fn test_session_max_chars_override() {
+        std::env::set_var("MEMPALACE_SESSION_MAX_CHARS", "1000");
+        assert_eq!(session_max_chars(), 1000);
+        std::env::remove_var("MEMPALACE_SESSION_MAX_CHARS");
     }
 }

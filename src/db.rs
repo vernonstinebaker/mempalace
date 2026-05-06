@@ -709,6 +709,7 @@ impl Database {
         content: &str,
         source_file: Option<&str>,
         added_by: &str,
+        filed_at: Option<&str>,
         embedder: Option<&Embedder>,
     ) -> Result<()> {
         // Get old rowid if exists (to clean up vec_drawers before replace)
@@ -730,10 +731,11 @@ impl Database {
                 .execute("DELETE FROM vec_embedded WHERE rowid = ?1", params![old]);
         }
 
+        let ft = filed_at.unwrap_or("datetime('now')");
         self.conn.execute(
             "INSERT OR REPLACE INTO drawers (id, wing, room, content, source_file, added_by, filed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
-            params![id, wing, room, content, source_file, added_by],
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![id, wing, room, content, source_file, added_by, ft],
         )?;
 
         let rowid = self.conn.last_insert_rowid();
@@ -1338,6 +1340,61 @@ impl Database {
             "top_tunnels": top_arr,
         }))
     }
+
+    /// List recently filed drawers, ordered by filed_at descending.
+    pub fn list_recent(
+        &self,
+        limit: usize,
+        wing: Option<&str>,
+        since: Option<&str>,
+    ) -> Result<Value> {
+        let (filter_sql, filter_params) = Self::build_filter_clause(wing, None, 1);
+        let since_clause = if since.is_some() {
+            let idx = filter_params.len() + 1;
+            format!(" AND d.filed_at >= ?{idx}")
+        } else {
+            String::new()
+        };
+
+        let sql = format!(
+            "SELECT d.id, d.wing, d.room, d.content, d.filed_at
+             FROM drawers d
+             WHERE 1=1{filter_sql}{since_clause}
+             ORDER BY d.filed_at DESC LIMIT {limit}"
+        );
+
+        let mut stmt = self.conn.prepare(&sql)?;
+
+        let mut all_params = filter_params;
+        if let Some(s) = since {
+            all_params.push(SqlValue::Text(s.to_string()));
+        }
+
+        let rows: Vec<(String, String, String, String, String)> = stmt
+            .query_map(
+                rusqlite::params_from_iter(all_params.iter()),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    ))
+                },
+            )
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        let results: Vec<Value> = rows
+            .into_iter()
+            .map(|(id, w, r, c, ft)| {
+                json!({"id": id, "wing": w, "room": r, "content": c, "filed_at": ft})
+            })
+            .collect();
+
+        Ok(Value::Array(results))
+    }
 }
 
 /// Parse a `filed_at` string (format "YYYY-MM-DD HH:MM:SS" or ISO) into seconds
@@ -1657,8 +1714,17 @@ mod tests {
     #[test]
     fn test_upsert_drawer_insert() {
         let (_dir, db) = test_db();
-        db.upsert_drawer("custom_id_1", "w", "r", "hello upsert", None, "test", None)
-            .unwrap();
+        db.upsert_drawer(
+            "custom_id_1",
+            "w",
+            "r",
+            "hello upsert",
+            None,
+            "test",
+            None,
+            None,
+        )
+        .unwrap();
         let count = db.get_drawer_count();
         assert_eq!(count, 1);
     }
@@ -1674,6 +1740,7 @@ mod tests {
             None,
             "test",
             None,
+            None,
         )
         .unwrap();
         db.upsert_drawer(
@@ -1683,6 +1750,7 @@ mod tests {
             "updated",
             None,
             "test",
+            None,
             None,
         )
         .unwrap();
@@ -2273,5 +2341,52 @@ mod tests {
     #[test]
     fn test_parse_filed_at_age_empty() {
         assert!(parse_filed_at_age("", 0.0).is_none());
+    }
+
+    // ── list_recent ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_list_recent_order() {
+        let (_dir, db) = test_db();
+        for i in 1..=3 {
+            db.conn
+                .execute(
+                    "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES (?1, 'w', 'r', ?2, ?3)",
+                    params![
+                        format!("recent_{i}"),
+                        format!("content {i}"),
+                        format!("2024-01-0{i} 00:00:00"),
+                    ],
+                )
+                .unwrap();
+        }
+        let results = db.list_recent(5, None, None).unwrap();
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+        // Newest first
+        assert!(arr[0]["filed_at"].as_str().unwrap().contains("2024-01-03"));
+    }
+
+    #[test]
+    fn test_list_recent_since() {
+        let (_dir, db) = test_db();
+        db.conn
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES ('old', 'w', 'r', 'c', '2023-06-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        db.conn
+            .execute(
+                "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES ('new', 'w', 'r', 'c', '2024-06-01 00:00:00')",
+                [],
+            )
+            .unwrap();
+        let results = db
+            .list_recent(5, None, Some("2024-01-01"))
+            .unwrap();
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["id"], "new");
     }
 }
