@@ -7,13 +7,13 @@ each phase independently shippable.
 
 | Dimension        | Current | Target | Phase that fixes it |
 |------------------|---------|--------|---------------------|
-| Search quality   | B+      | A+     | Phase 3             |
+| Search quality   | B+ → A  | A+     | Phase 3 ✓           |
 | Architecture     | A- → A  | A+     | Phase 2 ✓           |
-| Test coverage    | F  → D  | A+     | Phase 1 ✓           |
+| Test coverage    | F  → C+ | A+     | Phase 1 ✓           |
 | Code quality     | B  → A- | A+     | Phase 2 ✓           |
-| Feature completeness | C  | A+     | Phases 4–6         |
-| Import pipeline  | B+      | A+     | Phases 4–5         |
-| Error handling   | B- → B  | A+     | Phase 1 ✓           |
+| Feature completeness | C → B+ | A+    | Phases 4–6 ✓       |
+| Import pipeline  | B+ → A- | A+     | Phases 4–5 ✓       |
+| Error handling   | B- → B+ | A+     | Phase 1 ✓           |
 
 ---
 

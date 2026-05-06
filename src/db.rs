@@ -310,6 +310,7 @@ impl Database {
         embedder: Option<&Embedder>,
         sort_by: &str,
     ) -> Result<Value> {
+        let limit = limit.clamp(1, 1000);
         if sort_by == "recency" {
             return self.search_recent(query, limit, offset, wing, room, filed_after, filed_before);
         }
@@ -2677,5 +2678,67 @@ mod tests {
         db.set_sync_state("test_source", 100).unwrap();
         db.set_sync_state("test_source", 200).unwrap();
         assert_eq!(db.get_sync_state("test_source"), 200);
+    }
+
+    // ── input validation & edge cases ──────────────────────────────────────────
+
+    #[test]
+    fn test_search_limit_clamped() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "test", None, "test", None)
+            .unwrap();
+        let r = db
+            .search("test", 0, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert!(r["results"].as_array().unwrap().len() >= 1);
+    }
+
+    #[test]
+    fn test_search_offset_beyond_total() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "test", None, "test", None)
+            .unwrap();
+        let r = db
+            .search("test", 5, 100, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert_eq!(r["results"].as_array().unwrap().len(), 0);
+        assert!(r["total"].as_i64().unwrap() > 0);
+    }
+
+    #[test]
+    fn test_fts_search_unicode_query() {
+        let (_dir, db) = test_db();
+        // Default FTS5 tokenizer may not segment CJK — verify it doesn't panic
+        db.add_drawer("w", "r", "hello 世界 test", None, "test", None)
+            .unwrap();
+        let r = db
+            .search("hello", 5, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert!(!r["results"].as_array().unwrap().is_empty());
+    }
+
+    // ── performance smoke test ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_latency_budget() {
+        let (_dir, db) = test_db();
+        let n = 2000;
+        for i in 0..n {
+            db.add_drawer(
+                "wing",
+                &format!("r{i}"),
+                &format!("unique term {i} some filler for realistic perf testing"),
+                None,
+                "test",
+                None,
+            )
+            .unwrap();
+        }
+        let start = std::time::Instant::now();
+        let _ = db
+            .search("unique term", 10, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        let ms = start.elapsed().as_millis();
+        assert!(ms < 500, "search latency {ms}ms exceeds budget");
     }
 }

@@ -51,6 +51,25 @@ All 21 tools follow MCP conventions:
 - Agent diary and knowledge graph tools match the original spec
 - New tools (`update_drawer`, `bulk_replace`) added for maintenance workflows
 
+### 5. **Search with Recency Awareness**
+  `mempalace_search` supports three sort modes:
+  - `relevance` (default): hybrid vector + FTS5 with Reciprocal Rank Fusion
+  - `recency`: newest first, FTS5-filtered
+  - `hybrid`: RRF fusion with exponential time decay boost
+  - Pagination via `offset`, date range via `filed_after`/`filed_before`
+
+### 6. **Incremental Session Sync**
+  `mempalace_import_sessions` tracks last imported timestamp via `sync_state`
+  table — subsequent runs only import new/changed sessions. Use `full: true`
+  to force re-import. Sessions include tool names, first message, timestamp,
+  and message/part counts.
+
+### 7. **Export & Backup**
+  - `mempalace_export`: JSON Lines export by wing/room
+  - `mempalace_export_kg`: full knowledge graph as JSON
+  - `mempalace_backup`: copy palace.db with timestamp
+  - `mempalace_restore`: restore from backup
+
 ## 🚀 Enhancements Over Original
 
 ### ✅ Import from Existing Palace
@@ -248,6 +267,14 @@ DEALINGS IN THE SOFTWARE.
 - Embedding model → sentence-transformers/all-MiniLM-L6-v2 (ONNX conversion)
 - Hybrid retrieval design → academic literature on RRF (Cormack et al. 2009, Cormack & Clarke 2010)
 - MCP specification → [modelcontextprotocol.io](https://modelcontextprotocol.io)
+
+## 🧪 Testing
+
+```sh
+cargo test --release   # 107 tests: unit + integration + graph + search + sync
+cargo fmt -- --check   # code style
+cargo clippy -- -D warnings  # lint (some pre-existing warnings pending Phase 2 cleanup)
+```
 - Rust/sqlite-vec integration → [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec)
 - Pure-Rust ONNX → [github.com/pelotom/ tract](https://github.com/pelotom/tract)
 - Benchmark methodology → [LongMemEval](https://github.com/xiaowu0162/LongMemEval)

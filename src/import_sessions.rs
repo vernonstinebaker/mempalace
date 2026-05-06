@@ -436,13 +436,9 @@ mod tests {
     }
 
     #[test]
-    fn test_session_max_chars_default() {
+    fn test_session_max_chars() {
         std::env::remove_var("MEMPALACE_SESSION_MAX_CHARS");
         assert_eq!(session_max_chars(), 3000);
-    }
-
-    #[test]
-    fn test_session_max_chars_override() {
         std::env::set_var("MEMPALACE_SESSION_MAX_CHARS", "1000");
         assert_eq!(session_max_chars(), 1000);
         std::env::remove_var("MEMPALACE_SESSION_MAX_CHARS");
