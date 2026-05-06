@@ -5,15 +5,36 @@ each phase independently shippable.
 
 ## Status Dashboard
 
-| Dimension        | Current | Target | Phase that fixes it |
-|------------------|---------|--------|---------------------|
-| Search quality   | B+ → A  | A+     | Phase 3 ✓           |
-| Architecture     | A- → A  | A+     | Phase 2 ✓           |
-| Test coverage    | F  → C+ | A+     | Phase 1 ✓           |
-| Code quality     | B  → A- | A+     | Phase 2 ✓           |
-| Feature completeness | C → B+ | A+    | Phases 4–6 ✓       |
-| Import pipeline  | B+ → A- | A+     | Phases 4–5 ✓       |
-| Error handling   | B- → B+ | A+     | Phase 1 ✓           |
+| Dimension        | Start | Now  | Target | Phases |
+|------------------|-------|------|--------|--------|
+| Search quality   | B+    | A    | A+     | 3 ✓    |
+| Architecture     | A-    | A    | A+     | 2 ✓    |
+| Test coverage    | F     | C+   | B+     | 1 ✓, 8–14 |
+| Code quality     | B     | A-   | A      | 2 ✓, 8 |
+| Feature completeness | C | B+   | A      | 4–6 ✓, 11–12 |
+| Import pipeline  | B+    | A-   | A      | 4–5 ✓, 10 |
+| Error handling   | B-    | B+   | A-     | 1 ✓, 8–9 |
+| Data integrity   | C     | C    | B+     | 9 (health probe), 10 (WAL), 13 (validation) |
+| Operations       | D     | D    | B      | 14 (repair/reconnect) |
+
+### Phase overview
+
+| Phase | Title | Status |
+|-------|-------|--------|
+| 1 | Test harness & error safety | ✓ |
+| 2 | Deduplication & graph tool migration | ✓ |
+| 3 | Search recency | ✓ |
+| 4 | Session import quality | ✓ |
+| 5 | Incremental session sync | ✓ |
+| 6 | Pagination, export, backup | ✓ |
+| 7 | Validation & docs | ✓ |
+| 8 | Input sanitization | — |
+| 9 | Vector health probe & fallback | — |
+| 10 | Write-ahead log (audit trail) | — |
+| 11 | Cross-wing tunnels (CRUD) | — |
+| 12 | Drawer CRUD completeness | — |
+| 13 | KG valid_to + inverted interval guard | — |
+| 14 | Repair & maintenance | — |
 
 ---
 
@@ -538,8 +559,248 @@ When picking up this plan mid-execution:
    the code. The test is the authority.
 
 5. **After each phase:** run the full test suite and report:
-   ```
-   tests passed: N / total: M
-   clippy warnings: 0
-   fmt: clean
-   ```
+    ```
+    tests passed: N / total: M
+    clippy warnings: 0
+    fmt: clean
+    ```
+
+---
+
+## Phase 8 — Input Sanitization & Validation
+
+_Source: upstream audit against MemPalace/mempalace v3.3.5. Adds boundary
+validation to prevent silent errors from malformed user/LLM input._
+
+### 8.1 ISO date validation
+
+- [ ] Add `sanitize_iso_date(val) -> Option<&str>` to a new `src/validate.rs` module.
+  Accepts: `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, `YYYY-MM-DD HH:MM:SS`, empty string,
+  `None`. Rejects: `"yesterday"`, `"March 2026"`, `"today 5pm"` — natural-language
+  dates that pass through to SQLite and silently produce empty result sets.
+- [ ] Wire into: `kg_query(as_of)`, `kg_add(valid_from)`, `kg_invalidate(ended)`,
+  `search(filed_after, filed_before)`, `list_recent(since)`.
+- [ ] Tests:
+  - [ ] `test_accepts_full_iso` — `"2026-05-06 18:30:00"` passes
+  - [ ] `test_accepts_date_only` — `"2026-05-06"` passes
+  - [ ] `test_accepts_month_only` — `"2026-05"` passes
+  - [ ] `test_accepts_year_only` — `"2026"` passes
+  - [ ] `test_accepts_empty` — `""` and `None` pass
+  - [ ] `test_rejects_natural_language` — `"yesterday"`, `"two days ago"`, `"March 2026"` rejected
+  - [ ] `test_rejects_garbage` — `"not a date"` rejected
+
+### 8.2 Wing/room name validation
+
+- [ ] Add `sanitize_name(val, field_name) -> Result<&str>` in `src/validate.rs`.
+  Rejects: null bytes (`\0`), empty strings (unless field is optional),
+  strings > 256 chars, non-printable control characters.
+- [ ] Wire into: `add_drawer(wing, room)`, `search(wing, room)`, `list_recent(wing)`,
+  `export_drawers(wing, room)`, `diary_write(agent_name)`, `diary_read(agent_name)`.
+- [ ] Tests:
+  - [ ] `test_rejects_null_byte` — `"hello\0world"` rejected
+  - [ ] `test_rejects_empty_required` — `""` for required field rejected
+  - [ ] `test_accepts_empty_optional` — `""` for optional field passes as None
+  - [ ] `test_rejects_over_256_chars`
+  - [ ] `test_rejects_control_chars` — tab, newline, etc. in wing name
+
+### 8.3 Content length validation
+
+- [ ] Add `sanitize_content(val) -> Result<&str>` in `src/validate.rs`.
+  Rejects: null bytes, content > 100,000 chars (embedding limit).
+  Warns at > 10,000 chars (embeddings degrade).
+- [ ] Wire into `add_drawer(content)`.
+- [ ] Tests:
+  - [ ] `test_rejects_over_100k`
+  - [ ] `test_accepts_normal_content`
+
+### 8.4 Limit clamp hardening
+
+- [ ] Search `limit` already clamped to 1..1000. Add same clamp to:
+  `list_recent(limit)`, `diary_read(last_n)`.
+- [ ] Tests: verify clamping for each tool.
+
+**Phase 8 completion check:** `cargo test --release` green, `cargo fmt` clean.
+
+---
+
+## Phase 9 — Vector Health Probe & Graceful Fallback
+
+_Source: upstream's `quarantine_stale_hnsw` / `_refresh_vector_disabled_flag`
+pattern. Prevents silent partial/failed results when the vector index diverges._
+
+### 9.1 Add vec0 health probe
+
+- [ ] Add `fn probe_vec0_health(&self) -> Vec0Health` to `Database` in `db.rs`:
+  ```rust
+  struct Vec0Health {
+      sqlite_count: i64,     // COUNT(*) FROM drawers
+      vec0_count: i64,       // COUNT(*) FROM vec_drawers (or vec_drawers_rowids)
+      diverged: bool,        // true if gap > 5%
+      divergence_pct: f64,
+  }
+  ```
+- [ ] Run on startup (`main.rs`) and log a warning if diverged.
+- [ ] Test:
+  - [ ] `test_vec0_parity_on_fresh_db` — zero divergence
+  - [ ] `test_vec0_count_matches_drawers` — after 100 adds, counts match
+
+### 9.2 Graceful fallback when vector unavailable
+
+- [ ] If `probe_vec0_health()` reports divergence or vec0 errors at query time,
+  set a `vector_disabled: bool` flag and route all searches to FTS5-only path.
+- [ ] Return `vector_disabled: true` in `mempalace_status` response.
+- [ ] Add `mempalace_repair` tool that runs `reindex` (backfill embeddings) and
+  clears the disabled flag.
+- [ ] Test:
+  - [ ] `test_fts_fallback_when_vec_unavailable` — search returns results via FTS5 when vec0 is missing
+  - [ ] `test_status_reports_vector_disabled`
+
+**Phase 9 completion check:** `cargo test --release` green.
+
+---
+
+## Phase 10 — Write-Ahead Log (Audit Trail)
+
+_Source: upstream's `_wal_log()` pattern. JSONL audit log of every write
+operation with redacted content, enabling tamper detection and rollback._
+
+### 10.1 WAL implementation
+
+- [ ] Add `src/wal.rs` module with:
+  - `WalLogger::new(wal_dir)` — creates `~/.local/share/mempalace/wal/write_log.jsonl`
+    with restricted `0o600` permissions
+  - `log_write(operation: &str, params: HashMap<&str, &str>)` — appends JSONL entry
+    with `timestamp`, `operation`, `params` (content fields redacted to `[REDACTED N chars]`)
+  - `REDACT_KEYS: &[&str]` = `["content", "query", "entry", "text"]`
+- [ ] Wire into all write tools:
+  `add_drawer`, `delete_drawer`, `update_drawer`, `bulk_replace`,
+  `upsert_drawer` (when called via import), `kg_add`, `kg_invalidate`,
+  `diary_write`.
+- [ ] Tests:
+  - [ ] `test_wal_creates_file_with_restricted_perms` — file mode 0o600
+  - [ ] `test_wal_logs_write_operation` — entry written after add_drawer
+  - [ ] `test_wal_redacts_content` — content field shows `[REDACTED N chars]`
+  - [ ] `test_wal_logs_delete` — delete operation logged
+
+### 10.2 WAL inspection tool
+
+- [ ] Add `mempalace_wal_log` MCP tool — returns last N WAL entries.
+- [ ] Tests:
+  - [ ] `test_wal_log_returns_entries` — entries in reverse chronological order
+  - [ ] `test_wal_log_limit` — respects limit parameter
+
+**Phase 10 completion check:** `cargo test --release` green.
+
+---
+
+## Phase 11 — Cross-Wing Tunnels (CRUD)
+
+_Source: upstream's `create_tunnel`, `list_tunnels`, `delete_tunnel`, `follow_tunnels`.
+We auto-detect tunnels via `find_tunnels` but can't create/manage them explicitly._
+
+### 11.1 Tunnel storage table
+
+- [ ] Add `tunnels` table to schema:
+  ```sql
+  CREATE TABLE IF NOT EXISTS tunnels (
+      id TEXT PRIMARY KEY,
+      source_wing TEXT NOT NULL,
+      source_room TEXT NOT NULL,
+      target_wing TEXT NOT NULL,
+      target_room TEXT NOT NULL,
+      label TEXT DEFAULT '',
+      source_drawer_id TEXT,
+      target_drawer_id TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+  ```
+- [ ] Add `create_tunnel`, `list_tunnels`, `delete_tunnel`, `follow_tunnels` to `Database`.
+- [ ] Tests:
+  - [ ] `test_create_tunnel` — adds record
+  - [ ] `test_create_tunnel_idempotent` — same (source, target) returns existing ID
+  - [ ] `test_list_tunnels_filtered` — filter by wing
+  - [ ] `test_delete_tunnel` — removes record
+  - [ ] `test_follow_tunnels` — returns connected drawers from other wing
+  - [ ] `test_find_tunnels_includes_explicit` — explicit tunnels appear in find_tunnels results
+
+### 11.2 MCP tools + TOOLS_JSON
+
+- [ ] Add `mempalace_create_tunnel`, `mempalace_list_tunnels`, `mempalace_delete_tunnel`,
+  `mempalace_follow_tunnels` to TOOLS_JSON and handlers.
+
+**Phase 11 completion check:** `cargo test --release` green.
+
+---
+
+## Phase 12 — Drawer CRUD Completeness
+
+_Source: upstream's `get_drawer`, `list_drawers` tools. Fill gaps in drawer management._
+
+### 12.1 Single drawer fetch
+
+- [ ] Add `mempalace_get_drawer` tool — fetch one drawer by ID with full content + metadata.
+- [ ] Test: `test_get_drawer_returns_content`, `test_get_drawer_not_found`.
+
+### 12.2 Paginated drawer listing
+
+- [ ] Add `mempalace_list_drawers` tool — wing/room filter, `limit`/`offset` pagination,
+  total count, content preview (first 200 chars).
+- [ ] Test: `test_list_drawers_pagination`, `test_list_drawers_filtered`.
+
+### 12.3 Delete drawer returns deleted content
+
+- [ ] Modify `delete_drawer` to return a `deleted_content_preview` field (first 200 chars)
+  so callers can verify what was removed.
+- [ ] Test: `test_delete_drawer_returns_preview`.
+
+**Phase 12 completion check:** `cargo test --release` green.
+
+---
+
+## Phase 13 — `mempalace_kg_add` with `valid_to`
+
+_Source: upstream lets callers backfill historical facts with known end dates
+in a single call instead of requiring a separate `kg_invalidate`._
+
+### 13.1 Add valid_to to triple storage
+
+- [ ] Extend `triples` table schema: already has `valid_until` column — no schema change needed.
+- [ ] Add `valid_to: Option<&str>` parameter to `kg_add` in `knowledge_graph.rs`.
+- [ ] When `valid_to` is provided, set `valid_until` directly on INSERT.
+- [ ] Add inverted interval validation: reject if `valid_to < valid_from`.
+- [ ] Tests:
+  - [ ] `test_add_triple_with_valid_to` — stored with valid_until
+  - [ ] `test_add_triple_rejects_inverted` — valid_to < valid_from returns error
+  - [ ] `test_add_triple_valid_to_skips_invalidate` — no separate invalidate needed
+
+### 13.2 Wire to MCP
+
+- [ ] Add `valid_to` parameter to `mempalace_kg_add` in TOOLS_JSON and handler.
+- [ ] Add date validation via `sanitize_iso_date` from Phase 8.
+
+**Phase 13 completion check:** `cargo test --release` green.
+
+---
+
+## Phase 14 — Repair & Maintenance
+
+_Source: upstream's `mempalace repair` and `mempalace reconnect`. Operational
+tools for recovering from corruption or stale state._
+
+### 14.1 Repair tool
+
+- [ ] Add `mempalace_repair` tool:
+  - Calls `reindex` (backfill embeddings)
+  - Resets `sync_state` for opencode_sessions to force full re-import on next run
+  - Returns repair summary: `{reindexed: N, sync_reset: true}`
+- [ ] Test: `test_repair_reindexes_missing_embeddings`
+
+### 14.2 Reconnect / cache invalidation
+
+- [ ] Add `mempalace_reconnect` tool:
+  - Forces FTS5 index rebuild (`INSERT INTO drawers_fts(drawers_fts) VALUES('rebuild')`)
+  - Re-runs `probe_vec0_health()` and clears `vector_disabled` flag
+  - Returns status after reconnect
+- [ ] Test: `test_reconnect_rebuilds_fts`
+
+**Phase 14 completion check:** `cargo test --release` green.
