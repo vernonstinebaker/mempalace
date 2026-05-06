@@ -302,21 +302,24 @@ impl Database {
         &self,
         query: &str,
         limit: usize,
+        offset: usize,
         wing: Option<&str>,
         room: Option<&str>,
+        filed_after: Option<&str>,
+        filed_before: Option<&str>,
         embedder: Option<&Embedder>,
         sort_by: &str,
     ) -> Result<Value> {
         if sort_by == "recency" {
-            return self.search_recent(query, limit, wing, room);
+            return self.search_recent(query, limit, offset, wing, room, filed_after, filed_before);
         }
         let use_recency = sort_by == "hybrid";
-        // Hybrid: vector + FTS5 BM25 fused via Reciprocal Rank Fusion
         if let Some(emb) = embedder {
-            return self.search_hybrid(query, limit, wing, room, emb, use_recency);
+            return self.search_hybrid(
+                query, limit, offset, wing, room, filed_after, filed_before, emb, use_recency,
+            );
         }
-        // No embedder — pure FTS5 fallback
-        self.fts_search(query, limit, wing, room)
+        self.fts_search(query, limit, offset, wing, room, filed_after, filed_before)
     }
 
     // ── filter clause builder (shared by all search functions) ─────────────────
@@ -344,64 +347,73 @@ impl Database {
         (sql, params)
     }
 
-    // ── vector search ──────────────────────────────────────────────────────────
-
-    fn vector_search_raw(
-        &self,
-        vec_bytes: &[u8],
-        fetch: usize,
-        wing: Option<&str>,
-        room: Option<&str>,
-    ) -> Vec<(String, String, String, String, String, f64)> {
-        let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
-        let sql = format!(
-            "SELECT d.id, d.wing, d.room, d.content, d.filed_at, v.distance
-             FROM vec_drawers v
-             JOIN drawers d ON v.rowid = d.rowid
-             WHERE v.embedding MATCH ?1 AND k = {fetch}{filter_sql}
-             ORDER BY v.distance"
-        );
-
-        let mut stmt = match self.conn.prepare(&sql) {
-            Ok(s) => s,
-            Err(_) => return vec![],
-        };
-
-        let mut all_params = vec![SqlValue::Blob(vec_bytes.to_vec())];
-        all_params.extend(filter_params);
-
-        stmt.query_map(
-            rusqlite::params_from_iter(all_params.iter()),
-            |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
-                    row.get(5)?,
-                ))
-            },
-        )
-        .map(|iter| iter.filter_map(|r| r.ok()).collect())
-        .unwrap_or_default()
+    /// Build date-range filter clauses. Returns (sql_fragment, params).
+    fn build_date_clause(
+        filed_after: Option<&str>,
+        filed_before: Option<&str>,
+        idx_start: usize,
+    ) -> (String, Vec<SqlValue>) {
+        let mut sql = String::new();
+        let mut params = Vec::new();
+        let mut idx = idx_start;
+        if let Some(after) = filed_after {
+            sql.push_str(&format!(" AND d.filed_at >= ?{idx}"));
+            params.push(SqlValue::Text(after.to_string()));
+            idx += 1;
+        }
+        if let Some(before) = filed_before {
+            sql.push_str(&format!(" AND d.filed_at <= ?{idx}"));
+            params.push(SqlValue::Text(before.to_string()));
+        }
+        (sql, params)
     }
 
     fn fts_search(
         &self,
         query: &str,
         limit: usize,
+        offset: usize,
         wing: Option<&str>,
         room: Option<&str>,
+        filed_after: Option<&str>,
+        filed_before: Option<&str>,
     ) -> Result<Value> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let (date_sql, date_params) = Self::build_date_clause(
+            filed_after,
+            filed_before,
+            2 + filter_params.len(),
+        );
+
+        // Total count query (before limit/offset)
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM drawers_fts
+             JOIN drawers d ON drawers_fts.rowid = d.rowid
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}"
+        );
+        let mut count_params = vec![SqlValue::Text(safe_query.clone())];
+        count_params.extend(filter_params.clone());
+        count_params.extend(date_params.clone());
+        let total: i64 = self
+            .conn
+            .prepare(&count_sql)
+            .ok()
+            .and_then(|mut s| {
+                s.query_row(
+                    rusqlite::params_from_iter(count_params.iter()),
+                    |r| r.get(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0);
+
         let sql = format!(
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at, rank
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}
-             ORDER BY rank LIMIT {limit}"
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}
+             ORDER BY rank LIMIT {limit} OFFSET {offset}"
         );
 
         let mut stmt = match self.conn.prepare(&sql) {
@@ -411,6 +423,7 @@ impl Database {
 
         let mut all_params = vec![SqlValue::Text(safe_query)];
         all_params.extend(filter_params);
+        all_params.extend(date_params);
 
         let rows_result: rusqlite::Result<Vec<(String, String, String, String, String, f64)>> =
             stmt.query_map(
@@ -442,7 +455,12 @@ impl Database {
             }
         }
 
-        Ok(Value::Array(results))
+        Ok(json!({
+            "results": results,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }))
     }
 
     fn fts_search_raw(
@@ -451,14 +469,21 @@ impl Database {
         fetch: usize,
         wing: Option<&str>,
         room: Option<&str>,
+        filed_after: Option<&str>,
+        filed_before: Option<&str>,
     ) -> Vec<(String, String, String, String, String)> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let (date_sql, date_params) = Self::build_date_clause(
+            filed_after,
+            filed_before,
+            2 + filter_params.len(),
+        );
         let sql = format!(
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}
              ORDER BY rank LIMIT {fetch}"
         );
 
@@ -469,6 +494,7 @@ impl Database {
 
         let mut all_params = vec![SqlValue::Text(safe_query)];
         all_params.extend(filter_params);
+        all_params.extend(date_params);
 
         stmt.query_map(
             rusqlite::params_from_iter(all_params.iter()),
@@ -486,36 +512,89 @@ impl Database {
         .unwrap_or_default()
     }
 
+    fn vector_search_raw(
+        &self,
+        vec_bytes: &[u8],
+        fetch: usize,
+        wing: Option<&str>,
+        room: Option<&str>,
+        filed_after: Option<&str>,
+        filed_before: Option<&str>,
+    ) -> Vec<(String, String, String, String, String, f64)> {
+        let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let (date_sql, date_params) = Self::build_date_clause(
+            filed_after,
+            filed_before,
+            2 + filter_params.len(),
+        );
+        let sql = format!(
+            "SELECT d.id, d.wing, d.room, d.content, d.filed_at, v.distance
+             FROM vec_drawers v
+             JOIN drawers d ON v.rowid = d.rowid
+             WHERE v.embedding MATCH ?1 AND k = {fetch}{filter_sql}{date_sql}
+             ORDER BY v.distance"
+        );
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return vec![],
+        };
+
+        let mut all_params = vec![SqlValue::Blob(vec_bytes.to_vec())];
+        all_params.extend(filter_params);
+        all_params.extend(date_params);
+
+        stmt.query_map(
+            rusqlite::params_from_iter(all_params.iter()),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map(|iter| iter.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
     fn search_hybrid(
         &self,
         query: &str,
         limit: usize,
+        offset: usize,
         wing: Option<&str>,
         room: Option<&str>,
+        filed_after: Option<&str>,
+        filed_before: Option<&str>,
         embedder: &Embedder,
         use_recency: bool,
     ) -> Result<Value> {
         use std::collections::HashMap;
-        const K: f64 = 60.0; // standard RRF k parameter
-        let fetch = limit * 8; // wide candidate pool for fusion
+        const K: f64 = 60.0;
+        let fetch = limit * 8;
 
-        // Vector candidates (empty vec if embedding fails or vec0 not loaded)
         let vec_hits = if let Some(vec_bytes) = embedder.embed(query) {
-            self.vector_search_raw(&vec_bytes, fetch, wing, room)
+            self.vector_search_raw(&vec_bytes, fetch, wing, room, filed_after, filed_before)
         } else {
             vec![]
         };
 
-        // FTS BM25 candidates
-        let fts_hits = self.fts_search_raw(query, fetch, wing, room);
+        let fts_hits = self.fts_search_raw(query, fetch, wing, room, filed_after, filed_before);
 
         if vec_hits.is_empty() && fts_hits.is_empty() {
-            return Ok(Value::Array(vec![]));
+            return Ok(json!({
+                "results": [],
+                "total": 0,
+                "limit": limit,
+                "offset": offset,
+            }));
         }
 
-        // RRF: score(doc) = sum of 1/(K + rank_i + 1) across all lists
         let mut rrf_scores: HashMap<String, f64> = HashMap::new();
-        // meta: (wing, room, content, filed_at)
         let mut meta: HashMap<String, (String, String, String, String)> = HashMap::new();
 
         for (i, (id, w, r, c, ft, _dist)) in vec_hits.iter().enumerate() {
@@ -529,7 +608,6 @@ impl Database {
                 .or_insert_with(|| (w.clone(), r.clone(), c.clone(), ft.clone()));
         }
 
-        // Apply recency decay if enabled
         if use_recency {
             let now = Self::now_epoch_secs();
             let half_life = Self::recency_half_life();
@@ -548,34 +626,74 @@ impl Database {
         let mut ranked: Vec<(String, f64)> = rrf_scores.into_iter().collect();
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
+        let total = ranked.len();
+
         let results: Vec<Value> = ranked
             .into_iter()
+            .skip(offset)
             .take(limit)
             .filter_map(|(id, score)| {
                 let (w, r, c, ft) = meta.get(&id)?;
-                Some(json!({"id": id, "wing": w, "room": r, "content": c, "filed_at": ft, "rank": score}))
+                Some(json!({
+                    "id": id, "wing": w, "room": r, "content": c, "filed_at": ft, "rank": score,
+                }))
             })
             .collect();
 
-        Ok(Value::Array(results))
+        Ok(json!({
+            "results": results,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }))
     }
 
-    /// Search purely by recency (newest first), using FTS5 MATCH as a filter.
     fn search_recent(
         &self,
         query: &str,
         limit: usize,
+        offset: usize,
         wing: Option<&str>,
         room: Option<&str>,
+        filed_after: Option<&str>,
+        filed_before: Option<&str>,
     ) -> Result<Value> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let (date_sql, date_params) = Self::build_date_clause(
+            filed_after,
+            filed_before,
+            2 + filter_params.len(),
+        );
+
+        // Total count
+        let count_sql = format!(
+            "SELECT COUNT(*) FROM drawers_fts
+             JOIN drawers d ON drawers_fts.rowid = d.rowid
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}"
+        );
+        let mut count_params = vec![SqlValue::Text(safe_query.clone())];
+        count_params.extend(filter_params.clone());
+        count_params.extend(date_params.clone());
+        let total: i64 = self
+            .conn
+            .prepare(&count_sql)
+            .ok()
+            .and_then(|mut s| {
+                s.query_row(
+                    rusqlite::params_from_iter(count_params.iter()),
+                    |r| r.get(0),
+                )
+                .ok()
+            })
+            .unwrap_or(0);
+
         let sql = format!(
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}
-             ORDER BY d.filed_at DESC LIMIT {limit}"
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}
+             ORDER BY d.filed_at DESC LIMIT {limit} OFFSET {offset}"
         );
 
         let mut stmt = match self.conn.prepare(&sql) {
@@ -585,6 +703,7 @@ impl Database {
 
         let mut all_params = vec![SqlValue::Text(safe_query)];
         all_params.extend(filter_params);
+        all_params.extend(date_params);
 
         let rows_result: rusqlite::Result<Vec<(String, String, String, String, String)>> = stmt
             .query_map(
@@ -615,7 +734,12 @@ impl Database {
             }
         }
 
-        Ok(Value::Array(results))
+        Ok(json!({
+            "results": results,
+            "total": total,
+            "limit": limit,
+            "offset": offset,
+        }))
     }
 
     /// Current unix timestamp in seconds (for recency decay).
@@ -1426,6 +1550,117 @@ impl Database {
 
         Ok(Value::Array(results))
     }
+
+    // ── export / backup / restore ──────────────────────────────────────────────
+
+    /// Export drawers as JSON Lines string. Filter by wing and/or room.
+    pub fn export_drawers(&self, wing: Option<&str>, room: Option<&str>) -> Result<String> {
+        let (sql, params): (&str, Vec<SqlValue>) = match (wing, room) {
+            (Some(w), Some(r)) => (
+                "SELECT id, wing, room, content, source_file, filed_at
+                 FROM drawers WHERE wing = ?1 AND room = ?2 ORDER BY filed_at DESC",
+                vec![SqlValue::Text(w.to_string()), SqlValue::Text(r.to_string())],
+            ),
+            (Some(w), None) => (
+                "SELECT id, wing, room, content, source_file, filed_at
+                 FROM drawers WHERE wing = ?1 ORDER BY filed_at DESC",
+                vec![SqlValue::Text(w.to_string())],
+            ),
+            (None, Some(r)) => (
+                "SELECT id, wing, room, content, source_file, filed_at
+                 FROM drawers WHERE room = ?1 ORDER BY filed_at DESC",
+                vec![SqlValue::Text(r.to_string())],
+            ),
+            (None, None) => (
+                "SELECT id, wing, room, content, source_file, filed_at
+                 FROM drawers ORDER BY filed_at DESC",
+                vec![],
+            ),
+        };
+
+        let mut stmt = self.conn.prepare(sql)?;
+        let items: Vec<Value> = stmt
+            .query_map(rusqlite::params_from_iter(params.iter()), |r| {
+                Ok(json!({
+                    "id": r.get::<_, String>(0)?,
+                    "wing": r.get::<_, String>(1)?,
+                    "room": r.get::<_, String>(2)?,
+                    "content": r.get::<_, String>(3)?,
+                    "source_file": r.get::<_, Option<String>>(4)?,
+                    "filed_at": r.get::<_, Option<String>>(5)?,
+                }))
+            })
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        let lines: Vec<String> = items.into_iter().map(|v| v.to_string()).collect();
+        Ok(lines.join("\n"))
+    }
+
+    /// Export all knowledge graph triples as JSON.
+    pub fn export_kg(&self) -> Result<Value> {
+        let mut stmt = self.conn.prepare(
+            "SELECT subject, predicate, object, valid_from, valid_until, source_closet
+             FROM triples ORDER BY subject",
+        )?;
+        let triples: Vec<Value> = stmt
+            .query_map([], |r| {
+                let mut j = json!({
+                    "subject": r.get::<_, String>(0)?,
+                    "predicate": r.get::<_, String>(1)?,
+                    "object": r.get::<_, String>(2)?,
+                });
+                if let Ok(Some(vf)) = r.get::<_, Option<String>>(3) {
+                    j["valid_from"] = json!(vf);
+                }
+                if let Ok(Some(vu)) = r.get::<_, Option<String>>(4) {
+                    j["valid_until"] = json!(vu);
+                }
+                if let Ok(Some(sc)) = r.get::<_, Option<String>>(5) {
+                    j["source_closet"] = json!(sc);
+                }
+                Ok(j)
+            })
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default();
+
+        Ok(json!({"triples": triples, "count": triples.len()}))
+    }
+
+    /// Backup the palace database by copying the file.
+    pub fn backup(&self, path: Option<&str>) -> Result<String> {
+        let source = self.conn.path().unwrap_or("unknown").to_string();
+        let dest = match path {
+            Some(p) => p.to_string(),
+            None => {
+                let dir = std::path::Path::new(&source)
+                    .parent()
+                    .unwrap_or(std::path::Path::new("."))
+                    .join("backups");
+                std::fs::create_dir_all(&dir)?;
+                let ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                dir.join(format!("palace-backup-{ts}.db"))
+                    .to_str()
+                    .unwrap_or("backup.db")
+                    .to_string()
+            }
+        };
+        std::fs::copy(&source, &dest)?;
+        Ok(dest)
+    }
+
+    /// Restore from a backup file. Warning: overwrites current data.
+    pub fn restore(&self, backup_path: &str) -> Result<()> {
+        let source = self.conn.path().unwrap_or("unknown").to_string();
+        if !std::path::Path::new(backup_path).exists() {
+            return Err(anyhow!("Backup file not found: {backup_path}"));
+        }
+        std::fs::copy(backup_path, &source)?;
+        Ok(())
+    }
 }
 
 /// Parse a `filed_at` string (format "YYYY-MM-DD HH:MM:SS" or ISO) into seconds
@@ -1810,9 +2045,9 @@ mod tests {
         db.add_drawer("w", "r", "some unrelated stuff", None, "test", None)
             .unwrap();
         let results = db
-            .search("quick fox", 5, None, None, None, "relevance")
+            .search("quick fox", 5, 0, None, None, None, None, None, "relevance")
             .unwrap();
-        let arr = results.as_array().unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert!(!arr.is_empty());
         let first = &arr[0];
         assert!(first["content"].as_str().unwrap().contains("quick"));
@@ -1824,9 +2059,9 @@ mod tests {
         db.add_drawer("w", "r", "hello world", None, "test", None)
             .unwrap();
         let results = db
-            .search("zzzznotpresentzzzz", 5, None, None, None, "relevance")
+            .search("zzzznotpresentzzzz", 5, 0, None, None, None, None, None, "relevance")
             .unwrap();
-        let arr = results.as_array().unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert!(arr.is_empty());
     }
 
@@ -1837,8 +2072,8 @@ mod tests {
             .unwrap();
         db.add_drawer("beta", "r", "shared keyword", None, "test", None)
             .unwrap();
-        let results = db.search("shared", 10, Some("alpha"), None, None, "relevance").unwrap();
-        let arr = results.as_array().unwrap();
+        let results = db.search("shared", 10, 0, Some("alpha"), None, None, None, None, "relevance").unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["wing"].as_str().unwrap(), "alpha");
     }
@@ -1851,9 +2086,9 @@ mod tests {
         db.add_drawer("w", "garden", "planting tips", None, "test", None)
             .unwrap();
         let results = db
-            .search("recipe", 10, None, Some("kitchen"), None, "relevance")
+            .search("recipe", 10, 0, None, Some("kitchen"), None, None, None, "relevance")
             .unwrap();
-        let arr = results.as_array().unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["room"].as_str().unwrap(), "kitchen");
     }
@@ -1872,8 +2107,8 @@ mod tests {
             )
             .unwrap();
         }
-        let results = db.search("common", 3, None, None, None, "relevance").unwrap();
-        let arr = results.as_array().unwrap();
+        let results = db.search("common", 3, 0, None, None, None, None, None, "relevance").unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert_eq!(arr.len(), 3);
     }
 
@@ -2150,13 +2385,13 @@ mod tests {
         db.update_drawer(&id, "new refreshed content", None, None, None)
             .unwrap();
         // Search for new text via FTS
-        let results = db.search("refreshed", 5, None, None, None, "relevance").unwrap();
-        let arr = results.as_array().unwrap();
+        let results = db.search("refreshed", 5, 0, None, None, None, None, None, "relevance").unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert!(!arr.is_empty());
         assert!(arr[0]["content"].as_str().unwrap().contains("refreshed"));
         // Old text should not match
-        let old_results = db.search("old text", 5, None, None, None, "relevance").unwrap();
-        assert!(old_results.as_array().unwrap().is_empty());
+        let old_results = db.search("old text", 5, 0, None, None, None, None, None, "relevance").unwrap();
+        assert!(old_results["results"].as_array().unwrap().is_empty());
     }
 
     // ── graph tools ────────────────────────────────────────────────────────────
@@ -2317,9 +2552,9 @@ mod tests {
             .unwrap();
 
         let results = db
-            .search("common keyword", 5, None, None, None, "recency")
+            .search("common keyword", 5, 0, None, None, None, None, None, "recency")
             .unwrap();
-        let arr = results.as_array().unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert_eq!(arr.len(), 5);
         // Most recent first: 2024-05-01, then 2024-04-01, ...
         assert!(arr[0]["filed_at"].as_str().unwrap().contains("2024-05"));
@@ -2334,9 +2569,9 @@ mod tests {
         db.add_drawer("w", "r2", "some other unrelated text", None, "test", None)
             .unwrap();
         let results = db
-            .search("alpha", 2, None, None, None, "relevance")
+            .search("alpha", 2, 0, None, None, None, None, None, "relevance")
             .unwrap();
-        let arr = results.as_array().unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert!(arr[0]["room"] == "r1");
     }
 
@@ -2346,9 +2581,9 @@ mod tests {
         db.add_drawer("w", "r", "test filed_at presence", None, "test", None)
             .unwrap();
         let results = db
-            .search("filed_at presence", 1, None, None, None, "relevance")
+            .search("filed_at presence", 1, 0, None, None, None, None, None, "relevance")
             .unwrap();
-        let arr = results.as_array().unwrap();
+        let arr = results["results"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert!(arr[0]["filed_at"].as_str().is_some());
         assert!(!arr[0]["filed_at"].as_str().unwrap().is_empty());

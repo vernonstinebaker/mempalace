@@ -56,7 +56,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_traverse","description":"Walk the palace graph from a room. Shows connected ideas across wings \u2014 the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).","inputSchema":{"type":"object","properties":{"start_room":{"type":"string","description":"Room to start from (e.g. 'chromadb-setup', 'riley-school')"},"max_hops":{"type":"integer","description":"How many connections to follow (default: 2)"}},"required":["start_room"]}},"#,
     r#"{"name":"mempalace_find_tunnels","description":"Find rooms that bridge two wings \u2014 the hallways connecting different domains. E.g. what topics connect wing_code to wing_team?","inputSchema":{"type":"object","properties":{"wing_a":{"type":"string","description":"First wing (optional)"},"wing_b":{"type":"string","description":"Second wing (optional)"}}}},"#,
     r#"{"name":"mempalace_graph_stats","description":"Palace graph overview: total rooms, tunnel connections, edges between wings.","inputSchema":{"type":"object","properties":{}}},"#,
-    r#"{"name":"mempalace_search","description":"Semantic search. Returns verbatim drawer content with similarity scores. Use sort_by=relevance (default), recency (newest first), or hybrid (relevance + recency boost).","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"sort_by":{"type":"string","description":"Sort mode: relevance, recency, or hybrid (default: relevance)"}},"required":["query"]}},"#,
+    r#"{"name":"mempalace_search","description":"Semantic search with pagination. Returns results array, total count, limit, offset. Use sort_by=relevance (default), recency (newest first), or hybrid (relevance + recency boost).","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"filed_after":{"type":"string","description":"Only results filed after this ISO datetime (optional)"},"filed_before":{"type":"string","description":"Only results filed before this ISO datetime (optional)"},"sort_by":{"type":"string","description":"Sort mode: relevance, recency, or hybrid (default: relevance)"}},"required":["query"]}},"#,
     r#"{"name":"mempalace_check_duplicate","description":"Check if content already exists in the palace before filing","inputSchema":{"type":"object","properties":{"content":{"type":"string","description":"Content to check"},"threshold":{"type":"number","description":"Similarity threshold 0-1 (default 0.9)"}},"required":["content"]}},"#,
     r#"{"name":"mempalace_add_drawer","description":"File verbatim content into the palace. Checks for duplicates first.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing (project name)"},"room":{"type":"string","description":"Room (aspect: backend, decisions, meetings...)"},"content":{"type":"string","description":"Verbatim content to store \u2014 exact words, never summarized"},"source_file":{"type":"string","description":"Where this came from (optional)"},"added_by":{"type":"string","description":"Who is filing this (default: mcp)"}},"required":["wing","room","content"]}},"#,
     r#"{"name":"mempalace_delete_drawer","description":"Delete a drawer by ID. Irreversible.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to delete"}},"required":["drawer_id"]}},"#,
@@ -65,7 +65,11 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}},"#,
     r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable. Defaults to incremental (only new sessions). Use full=true to re-import all.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
-    r#"{"name":"mempalace_list_recent","description":"List recently filed content, ordered by filed_at descending. Use this when you need to know what's new.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max results (default 20)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"since":{"type":"string","description":"Only entries filed after this ISO datetime"}}}}"#,
+    r#"{"name":"mempalace_list_recent","description":"List recently filed content, ordered by filed_at descending. Use this when you need to know what's new.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max results (default 20)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"since":{"type":"string","description":"Only entries filed after this ISO datetime"}}}},"#,
+    r#"{"name":"mempalace_export","description":"Export drawers as JSON Lines. Filter by wing and/or room.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"}}}},"#,
+    r#"{"name":"mempalace_export_kg","description":"Export knowledge graph triples as JSON.","inputSchema":{"type":"object","properties":{}}},"#,
+    r#"{"name":"mempalace_backup","description":"Backup the entire palace database by copying the DB file. Returns the backup path.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Destination path for the backup (default: ~/.local/share/mempalace/backups/<timestamp>.db)"}}}},"#,
+    r#"{"name":"mempalace_restore","description":"Restore the palace from a backup file. WARNING: replaces current data.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Path to the backup .db file to restore from"}},"required":["path"]}}"#,
     "]"
 );
 
@@ -325,12 +329,16 @@ impl<'a> Server<'a> {
                 let query = get_str(args, "query")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: query"))?;
                 let limit = get_i64(args, "limit").unwrap_or(5) as usize;
+                let offset = get_i64(args, "offset").unwrap_or(0) as usize;
                 let wing = get_str(args, "wing");
                 let room = get_str(args, "room");
+                let filed_after = get_str(args, "filed_after");
+                let filed_before = get_str(args, "filed_before");
                 let sort_by = get_str(args, "sort_by").unwrap_or("relevance");
-                let results = self
-                    .db
-                    .search(query, limit, wing, room, self.embedder.as_ref(), sort_by)?;
+                let results = self.db.search(
+                    query, limit, offset, wing, room, filed_after, filed_before,
+                    self.embedder.as_ref(), sort_by,
+                )?;
                 Ok(serde_json::to_string(&results)?)
             }
 
@@ -536,6 +544,44 @@ impl<'a> Server<'a> {
                 let since = get_str(args, "since");
                 let results = self.db.list_recent(limit, wing, since)?;
                 Ok(serde_json::to_string(&results)?)
+            }
+
+            // ── mempalace_export ──────────────────────────────────────────────
+            "mempalace_export" => {
+                let wing = get_str(args, "wing");
+                let room = get_str(args, "room");
+                let result = self.db.export_drawers(wing, room)?;
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "data": result,
+                }))?)
+            }
+
+            // ── mempalace_export_kg ────────────────────────────────────────────
+            "mempalace_export_kg" => {
+                let result = self.db.export_kg()?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_backup ───────────────────────────────────────────────
+            "mempalace_backup" => {
+                let path = get_str(args, "path").map(|s| s.to_string());
+                let backup_path = self.db.backup(path.as_deref())?;
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "path": backup_path,
+                }))?)
+            }
+
+            // ── mempalace_restore ──────────────────────────────────────────────
+            "mempalace_restore" => {
+                let path = get_str(args, "path")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: path"))?;
+                self.db.restore(path)?;
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "restored_from": path,
+                }))?)
             }
 
             _ => Err(anyhow::anyhow!("UnknownTool: {name}")),
