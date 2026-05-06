@@ -6,6 +6,7 @@ mod indexer;
 mod knowledge_graph;
 mod log;
 mod mcp;
+mod validate;
 
 use crate::log::log;
 use rusqlite::ffi::sqlite3_auto_extension;

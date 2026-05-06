@@ -6,6 +6,7 @@ use crate::db::Database;
 use crate::embed::Embedder;
 use crate::import_sessions;
 use crate::knowledge_graph::KnowledgeGraph;
+use crate::validate;
 
 // ── Protocol / AAAK strings ───────────────────────────────────────────────────
 
@@ -230,7 +231,7 @@ impl<'a> Server<'a> {
             "mempalace_kg_query" => {
                 let entity = get_str(args, "entity")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: entity"))?;
-                let as_of = get_str(args, "as_of");
+                let as_of = validate::sanitize_iso_date(get_str(args, "as_of"))?;
                 let direction = get_str(args, "direction").unwrap_or("both");
                 let facts = kg.query_entity(entity, as_of, direction)?;
                 let count = facts.as_array().map(|a| a.len()).unwrap_or(0);
@@ -253,7 +254,7 @@ impl<'a> Server<'a> {
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: predicate"))?;
                 let object = get_str(args, "object")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: object"))?;
-                let valid_from = get_str(args, "valid_from");
+                let valid_from = validate::sanitize_iso_date(get_str(args, "valid_from"))?;
                 let source_closet = get_str(args, "source_closet");
                 let triple_id =
                     kg.add_triple(subject, predicate, object, valid_from, source_closet)?;
@@ -273,7 +274,7 @@ impl<'a> Server<'a> {
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: predicate"))?;
                 let object = get_str(args, "object")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: object"))?;
-                let ended = get_str(args, "ended");
+                let ended = validate::sanitize_iso_date(get_str(args, "ended"))?;
                 kg.invalidate(subject, predicate, object, ended)?;
                 let fact_str = format!("{subject} \u{2192} {predicate} \u{2192} {object}");
                 Ok(serde_json::to_string(&json!({
@@ -330,10 +331,10 @@ impl<'a> Server<'a> {
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: query"))?;
                 let limit = get_i64(args, "limit").unwrap_or(5) as usize;
                 let offset = get_i64(args, "offset").unwrap_or(0) as usize;
-                let wing = get_str(args, "wing");
-                let room = get_str(args, "room");
-                let filed_after = get_str(args, "filed_after");
-                let filed_before = get_str(args, "filed_before");
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let room = validate::sanitize_name(get_str(args, "room"), "room")?;
+                let filed_after = validate::sanitize_iso_date(get_str(args, "filed_after"))?;
+                let filed_before = validate::sanitize_iso_date(get_str(args, "filed_before"))?;
                 let sort_by = get_str(args, "sort_by").unwrap_or("relevance");
                 let results = self.db.search(
                     query, limit, offset, wing, room, filed_after, filed_before,
@@ -355,12 +356,19 @@ impl<'a> Server<'a> {
 
             // ── mempalace_add_drawer ──────────────────────────────────────────
             "mempalace_add_drawer" => {
-                let wing = get_str(args, "wing")
-                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: wing"))?;
-                let room = get_str(args, "room")
-                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: room"))?;
-                let content = get_str(args, "content")
+                let wing = validate::sanitize_name_required(
+                    get_str(args, "wing")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: wing"))?,
+                    "wing",
+                )?;
+                let room = validate::sanitize_name_required(
+                    get_str(args, "room")
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: room"))?,
+                    "room",
+                )?;
+                let content_raw = get_str(args, "content")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: content"))?;
+                let content = validate::sanitize_content(content_raw)?;
                 let source_file = get_str(args, "source_file");
                 let added_by = get_str(args, "added_by").unwrap_or("mcp");
 
@@ -498,6 +506,7 @@ impl<'a> Server<'a> {
                 let agent_name = get_str(args, "agent_name")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: agent_name"))?;
                 let last_n = get_i64(args, "last_n").unwrap_or(10) as usize;
+                let last_n = last_n.clamp(1, 100);
                 let normalized = normalize_agent_name(agent_name);
                 let wing = format!("wing_{normalized}");
                 let data = self.db.get_diary_entries(&wing, last_n)?;
@@ -540,16 +549,17 @@ impl<'a> Server<'a> {
             // ── mempalace_list_recent ─────────────────────────────────────────
             "mempalace_list_recent" => {
                 let limit = get_i64(args, "limit").unwrap_or(20) as usize;
-                let wing = get_str(args, "wing");
-                let since = get_str(args, "since");
+                let limit = limit.clamp(1, 100);
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let since = validate::sanitize_iso_date(get_str(args, "since"))?;
                 let results = self.db.list_recent(limit, wing, since)?;
                 Ok(serde_json::to_string(&results)?)
             }
 
             // ── mempalace_export ──────────────────────────────────────────────
             "mempalace_export" => {
-                let wing = get_str(args, "wing");
-                let room = get_str(args, "room");
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let room = validate::sanitize_name(get_str(args, "room"), "room")?;
                 let result = self.db.export_drawers(wing, room)?;
                 Ok(serde_json::to_string(&json!({
                     "success": true,
