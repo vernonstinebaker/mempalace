@@ -9,13 +9,13 @@ each phase independently shippable.
 |------------------|-------|------|--------|--------|
 | Search quality   | B+    | A    | A+     | 3 ✓    |
 | Architecture     | A-    | A    | A+     | 2 ✓    |
-| Test coverage    | F     | C+   | B+     | 1 ✓, 8–14 |
-| Code quality     | B     | A-   | A      | 2 ✓, 8 |
-| Feature completeness | C | B+   | A      | 4–6 ✓, 11–12 |
-| Import pipeline  | B+    | A-   | A      | 4–5 ✓, 10 |
-| Error handling   | B-    | B+   | A-     | 1 ✓, 8–9 |
-| Data integrity   | C     | C    | B+     | 9 (health probe), 10 (WAL), 13 (validation) |
-| Operations       | D     | D    | B      | 14 (repair/reconnect) |
+| Test coverage    | F     | B-   | B+     | 1 ✓, 8–14 ✓ |
+| Code quality     | B     | A-   | A      | 2 ✓, 8 ✓ |
+| Feature completeness | C | A-   | A      | 4–6 ✓, 11–12 ✓ |
+| Import pipeline  | B+    | A-   | A      | 4–5 ✓, 10 ✓ |
+| Error handling   | B-    | B+   | A-     | 1 ✓, 8–9 ✓ |
+| Data integrity   | C     | B    | B+     | 9 ✓, 10 ✓, 13 ✓ |
+| Operations       | D     | B    | B      | 14 ✓ |
 
 ### Phase overview
 
@@ -28,13 +28,13 @@ each phase independently shippable.
 | 5 | Incremental session sync | ✓ |
 | 6 | Pagination, export, backup | ✓ |
 | 7 | Validation & docs | ✓ |
-| 8 | Input sanitization | — |
-| 9 | Vector health probe & fallback | — |
-| 10 | Write-ahead log (audit trail) | — |
-| 11 | Cross-wing tunnels (CRUD) | — |
-| 12 | Drawer CRUD completeness | — |
-| 13 | KG valid_to + inverted interval guard | — |
-| 14 | Repair & maintenance | — |
+| 8 | Input sanitization | ✓ |
+| 9 | Vector health probe & fallback | ✓ |
+| 10 | Write-ahead log (audit trail) | ✓ |
+| 11 | Cross-wing tunnels (CRUD) | ✓ |
+| 12 | Drawer CRUD completeness | ✓ |
+| 13 | KG valid_to + inverted interval guard | ✓ |
+| 14 | Repair & maintenance | ✓ |
 
 ---
 
