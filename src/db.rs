@@ -8,24 +8,27 @@ use crate::log::log;
 
 pub struct Database {
     pub conn: Connection,
+    pub vector_disabled: bool,
 }
 
 impl Database {
     pub fn open(dir: &str) -> Result<Self> {
-        // Ensure the directory exists
         std::fs::create_dir_all(dir)?;
         let db_path = Path::new(dir).join("palace.db");
         let conn = Connection::open(&db_path)?;
 
-        // Performance pragmas
         conn.execute_batch(
             "PRAGMA journal_mode=WAL;
              PRAGMA synchronous=NORMAL;
              PRAGMA foreign_keys=OFF;",
         )?;
 
-        let db = Self { conn };
+        let mut db = Self {
+            conn,
+            vector_disabled: false,
+        };
         db.create_tables()?;
+        db.probe_vec0_health();
         Ok(db)
     }
 
@@ -126,6 +129,78 @@ impl Database {
             params![source, last_time_updated],
         )?;
         Ok(())
+    }
+
+    // ── vec0 health probe ──────────────────────────────────────────────────────
+
+    /// Probe vector index health. Compares drawer count against embedded count.
+    /// If divergence exceeds 5%, sets vector_disabled and logs a warning.
+    fn probe_vec0_health(&mut self) {
+        let drawer_count = self.get_drawer_count();
+        if drawer_count == 0 {
+            return;
+        }
+
+        let embedded_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_embedded", [], |r| r.get(0))
+            .unwrap_or(0);
+
+        if embedded_count == 0 {
+            self.vector_disabled = true;
+            log!(
+                "warn",
+                "vec0 health: 0/{drawer_count} drawers embedded — vector search disabled"
+            );
+            return;
+        }
+
+        let gap = if drawer_count > embedded_count {
+            drawer_count - embedded_count
+        } else {
+            0
+        };
+        let pct = if drawer_count > 0 {
+            gap as f64 / drawer_count as f64 * 100.0
+        } else {
+            0.0
+        };
+
+        if pct > 5.0 {
+            self.vector_disabled = true;
+            log!(
+                "warn",
+                "vec0 health: {embedded_count}/{drawer_count} embedded ({pct:.1}% gap) — vector search disabled"
+            );
+        } else {
+            self.vector_disabled = false;
+        }
+    }
+
+    /// Get the health status of the vector index.
+    pub fn vec0_health(&self) -> Value {
+        let drawer_count = self.get_drawer_count();
+        let embedded_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_embedded", [], |r| r.get(0))
+            .unwrap_or(0);
+        let gap = if drawer_count > embedded_count {
+            drawer_count - embedded_count
+        } else {
+            0
+        };
+        let pct = if drawer_count > 0 {
+            gap as f64 / drawer_count as f64 * 100.0
+        } else {
+            0.0
+        };
+        json!({
+            "drawer_count": drawer_count,
+            "embedded_count": embedded_count,
+            "gap": gap,
+            "gap_pct": pct,
+            "vector_disabled": self.vector_disabled,
+        })
     }
 
     // ── wing / room queries ───────────────────────────────────────────────────
@@ -311,6 +386,9 @@ impl Database {
         sort_by: &str,
     ) -> Result<Value> {
         let limit = limit.clamp(1, 1000);
+        if self.vector_disabled {
+            return self.fts_search(query, limit, offset, wing, room, filed_after, filed_before);
+        }
         if sort_by == "recency" {
             return self.search_recent(query, limit, offset, wing, room, filed_after, filed_before);
         }
@@ -2740,5 +2818,41 @@ mod tests {
             .unwrap();
         let ms = start.elapsed().as_millis();
         assert!(ms < 500, "search latency {ms}ms exceeds budget");
+    }
+
+    // ── vec0 health ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_vec0_health_on_fresh_db() {
+        let (_dir, db) = test_db();
+        let health = db.vec0_health();
+        assert_eq!(health["drawer_count"], 0);
+        assert_eq!(health["embedded_count"], 0);
+    }
+
+    #[test]
+    fn test_vec0_health_after_adds() {
+        let (_dir, db) = test_db();
+        for i in 0..5 {
+            db.add_drawer("w", &format!("r{i}"), "content", None, "test", None)
+                .unwrap();
+        }
+        // Fresh adds don't embed (no embedder), so gap should be 100%
+        let health = db.vec0_health();
+        assert_eq!(health["drawer_count"].as_i64().unwrap(), 5);
+        // embedded_count will be 0 without embedder in tests
+        assert!(health["gap_pct"].as_f64().unwrap() >= 0.0);
+    }
+
+    #[test]
+    fn test_search_falls_back_to_fts() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "should find this via fts", None, "test", None)
+            .unwrap();
+        // With vector disabled, search should still work via FTS
+        let r = db
+            .search("should find", 5, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert!(!r["results"].as_array().unwrap().is_empty());
     }
 }

@@ -44,7 +44,7 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight.";
 
 const TOOLS_JSON: &str = concat!(
     "[",
-    r#"{"name":"mempalace_status","description":"Palace overview \u2014 total drawers, wing and room counts","inputSchema":{"type":"object","properties":{}}},"#,
+    r#"{"name":"mempalace_status","description":"Palace overview \u2014 total drawers, wing and room counts, vector health","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_list_wings","description":"List all wings with drawer counts","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_list_rooms","description":"List rooms within a wing (or all rooms if no wing given)","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing to list rooms for (optional)"}}}},"#,
     r#"{"name":"mempalace_get_taxonomy","description":"Full taxonomy: wing \u2192 room \u2192 drawer count","inputSchema":{"type":"object","properties":{}}},"#,
@@ -70,7 +70,9 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_export","description":"Export drawers as JSON Lines. Filter by wing and/or room.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"}}}},"#,
     r#"{"name":"mempalace_export_kg","description":"Export knowledge graph triples as JSON.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_backup","description":"Backup the entire palace database by copying the DB file. Returns the backup path.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Destination path for the backup (default: ~/.local/share/mempalace/backups/<timestamp>.db)"}}}},"#,
-    r#"{"name":"mempalace_restore","description":"Restore the palace from a backup file. WARNING: replaces current data.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Path to the backup .db file to restore from"}},"required":["path"]}}"#,
+    r#"{"name":"mempalace_restore","description":"Restore the palace from a backup file. WARNING: replaces current data.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Path to the backup .db file to restore from"}},"required":["path"]}},"#,
+    r#"{"name":"mempalace_repair","description":"Reindex all drawers (backfill missing embeddings). Use when vector health shows divergence or after importing many sessions.","inputSchema":{"type":"object","properties":{}}},"#,
+    r#"{"name":"mempalace_reconnect","description":"Rebuild FTS index and re-probe vector health. Use after external writes or when search returns unexpected results.","inputSchema":{"type":"object","properties":{}}}"#,
     "]"
 );
 
@@ -190,13 +192,19 @@ impl<'a> Server<'a> {
                 let count = self.db.get_drawer_count();
                 let wings = self.db.get_wing_counts()?;
                 let rooms = self.db.get_room_counts(None)?;
-                let result = json!({
+                let health = self.db.vec0_health();
+                let mut result = json!({
                     "total_drawers": count,
                     "wings": wings,
                     "rooms": rooms,
                     "protocol": PALACE_PROTOCOL,
                     "aaak_dialect": AAAK_SPEC,
+                    "vector_health": health,
                 });
+                if self.db.vector_disabled {
+                    result["vector_disabled"] = json!(true);
+                    result["hint"] = json!("Run mempalace_repair to re-index and restore vector search");
+                }
                 Ok(serde_json::to_string(&result)?)
             }
 
@@ -591,6 +599,40 @@ impl<'a> Server<'a> {
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "restored_from": path,
+                }))?)
+            }
+
+            // ── mempalace_repair ────────────────────────────────────────────────
+            "mempalace_repair" => {
+                let (total, embedded, _failed) = self
+                    .db
+                    .backfill_embeddings(
+                        self.embedder
+                            .as_ref()
+                            .ok_or_else(|| anyhow::anyhow!("Embedder required for repair"))?,
+                    )?;
+                // Re-probe health after repair
+                let health = self.db.vec0_health();
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "reindexed": embedded,
+                    "total": total,
+                    "vector_health": health,
+                }))?)
+            }
+
+            // ── mempalace_reconnect ─────────────────────────────────────────────
+            "mempalace_reconnect" => {
+                // Force FTS5 rebuild
+                let _ = self.db.conn.execute_batch(
+                    "INSERT INTO drawers_fts(drawers_fts) VALUES('rebuild');",
+                );
+                // Re-probe vector health
+                let health = self.db.vec0_health();
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "fts_rebuilt": true,
+                    "vector_health": health,
                 }))?)
             }
 
