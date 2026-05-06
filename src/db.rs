@@ -149,12 +149,19 @@ impl Database {
     // ── vec0 health probe ──────────────────────────────────────────────────────
 
     /// Probe vector index health. Compares drawer count against embedded count.
+    /// Syncs vec_embedded from vec_drawers_rowids first, then checks.
     /// If divergence exceeds 5%, sets vector_disabled and logs a warning.
     fn probe_vec0_health(&mut self) {
         let drawer_count = self.get_drawer_count();
         if drawer_count == 0 {
             return;
         }
+
+        // Sync shadow table from actual vec0 index before counting
+        let _ = self.conn.execute_batch(
+            "INSERT OR IGNORE INTO vec_embedded(rowid)
+             SELECT rowid FROM vec_drawers_rowids;",
+        );
 
         let embedded_count: i64 = self
             .conn
@@ -194,6 +201,12 @@ impl Database {
 
     /// Get the health status of the vector index.
     pub fn vec0_health(&self) -> Value {
+        // Sync shadow table from actual vec0 index first
+        let _ = self.conn.execute_batch(
+            "INSERT OR IGNORE INTO vec_embedded(rowid)
+             SELECT rowid FROM vec_drawers_rowids;",
+        );
+
         let drawer_count = self.get_drawer_count();
         let embedded_count: i64 = self
             .conn
