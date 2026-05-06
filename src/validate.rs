@@ -1,8 +1,6 @@
 // Input validation helpers. Reject malformed input at the boundary before
 // it reaches SQLite and silently produces empty result sets.
 
-use crate::log;
-
 /// Validate ISO-ish date strings. Accepts: YYYY, YYYY-MM, YYYY-MM-DD,
 /// YYYY-MM-DD HH:MM:SS, empty string, None.
 /// Rejects natural-language dates ("yesterday", "March 2026") and garbage.

@@ -7,6 +7,7 @@ use crate::embed::Embedder;
 use crate::import_sessions;
 use crate::knowledge_graph::KnowledgeGraph;
 use crate::validate;
+use crate::wal;
 
 // ── Protocol / AAAK strings ───────────────────────────────────────────────────
 
@@ -72,7 +73,8 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_backup","description":"Backup the entire palace database by copying the DB file. Returns the backup path.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Destination path for the backup (default: ~/.local/share/mempalace/backups/<timestamp>.db)"}}}},"#,
     r#"{"name":"mempalace_restore","description":"Restore the palace from a backup file. WARNING: replaces current data.","inputSchema":{"type":"object","properties":{"path":{"type":"string","description":"Path to the backup .db file to restore from"}},"required":["path"]}},"#,
     r#"{"name":"mempalace_repair","description":"Reindex all drawers (backfill missing embeddings). Use when vector health shows divergence or after importing many sessions.","inputSchema":{"type":"object","properties":{}}},"#,
-    r#"{"name":"mempalace_reconnect","description":"Rebuild FTS index and re-probe vector health. Use after external writes or when search returns unexpected results.","inputSchema":{"type":"object","properties":{}}}"#,
+    r#"{"name":"mempalace_reconnect","description":"Rebuild FTS index and re-probe vector health. Use after external writes or when search returns unexpected results.","inputSchema":{"type":"object","properties":{}}},"#,
+    r#"{"name":"mempalace_wal_log","description":"Read write-ahead log entries (audit trail). Returns last N entries newest-first.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max entries to return (default 20)"}}}}"#,
     "]"
 );
 
@@ -405,6 +407,10 @@ impl<'a> Server<'a> {
                     added_by,
                     self.embedder.as_ref(),
                 )?;
+                wal::log_write("add_drawer", json!({
+                    "wing": wing, "room": room, "content": content,
+                    "drawer_id": drawer_id, "added_by": added_by,
+                }));
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "drawer_id": drawer_id,
@@ -418,10 +424,16 @@ impl<'a> Server<'a> {
                 let drawer_id = get_str(args, "drawer_id")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: drawer_id"))?;
                 match self.db.delete_drawer(drawer_id) {
-                    Ok(()) => Ok(serde_json::to_string(&json!({
-                        "success": true,
-                        "drawer_id": drawer_id,
-                    }))?),
+                    Ok(()) => {
+                        wal::log_write(
+                            "delete_drawer",
+                            json!({"drawer_id": drawer_id}),
+                        );
+                        Ok(serde_json::to_string(&json!({
+                            "success": true,
+                            "drawer_id": drawer_id,
+                        }))?)
+                    }
                     Err(e) if e.to_string().contains("DrawerNotFound") => {
                         Ok(serde_json::to_string(&json!({
                             "success": false,
@@ -623,16 +635,25 @@ impl<'a> Server<'a> {
 
             // ── mempalace_reconnect ─────────────────────────────────────────────
             "mempalace_reconnect" => {
-                // Force FTS5 rebuild
                 let _ = self.db.conn.execute_batch(
                     "INSERT INTO drawers_fts(drawers_fts) VALUES('rebuild');",
                 );
-                // Re-probe vector health
                 let health = self.db.vec0_health();
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "fts_rebuilt": true,
                     "vector_health": health,
+                }))?)
+            }
+
+            // ── mempalace_wal_log ───────────────────────────────────────────────
+            "mempalace_wal_log" => {
+                let limit = get_i64(args, "limit").unwrap_or(20) as usize;
+                let limit = limit.clamp(1, 100);
+                let entries = wal::read_entries(limit);
+                Ok(serde_json::to_string(&json!({
+                    "entries": entries,
+                    "count": entries.len(),
                 }))?)
             }
 
