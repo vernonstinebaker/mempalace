@@ -55,7 +55,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_traverse","description":"Walk the palace graph from a room. Shows connected ideas across wings \u2014 the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).","inputSchema":{"type":"object","properties":{"start_room":{"type":"string","description":"Room to start from (e.g. 'chromadb-setup', 'riley-school')"},"max_hops":{"type":"integer","description":"How many connections to follow (default: 2)"}},"required":["start_room"]}},"#,
     r#"{"name":"mempalace_find_tunnels","description":"Find rooms that bridge two wings \u2014 the hallways connecting different domains. E.g. what topics connect wing_code to wing_team?","inputSchema":{"type":"object","properties":{"wing_a":{"type":"string","description":"First wing (optional)"},"wing_b":{"type":"string","description":"Second wing (optional)"}}}},"#,
     r#"{"name":"mempalace_graph_stats","description":"Palace graph overview: total rooms, tunnel connections, edges between wings.","inputSchema":{"type":"object","properties":{}}},"#,
-    r#"{"name":"mempalace_search","description":"Semantic search. Returns verbatim drawer content with similarity scores.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"}},"required":["query"]}},"#,
+    r#"{"name":"mempalace_search","description":"Semantic search. Returns verbatim drawer content with similarity scores. Use sort_by=relevance (default), recency (newest first), or hybrid (relevance + recency boost).","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"sort_by":{"type":"string","description":"Sort mode: relevance, recency, or hybrid (default: relevance)"}},"required":["query"]}},"#,
     r#"{"name":"mempalace_check_duplicate","description":"Check if content already exists in the palace before filing","inputSchema":{"type":"object","properties":{"content":{"type":"string","description":"Content to check"},"threshold":{"type":"number","description":"Similarity threshold 0-1 (default 0.9)"}},"required":["content"]}},"#,
     r#"{"name":"mempalace_add_drawer","description":"File verbatim content into the palace. Checks for duplicates first.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing (project name)"},"room":{"type":"string","description":"Room (aspect: backend, decisions, meetings...)"},"content":{"type":"string","description":"Verbatim content to store \u2014 exact words, never summarized"},"source_file":{"type":"string","description":"Where this came from (optional)"},"added_by":{"type":"string","description":"Who is filing this (default: mcp)"}},"required":["wing","room","content"]}},"#,
     r#"{"name":"mempalace_delete_drawer","description":"Delete a drawer by ID. Irreversible.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to delete"}},"required":["drawer_id"]}},"#,
@@ -324,9 +324,10 @@ impl<'a> Server<'a> {
                 let limit = get_i64(args, "limit").unwrap_or(5) as usize;
                 let wing = get_str(args, "wing");
                 let room = get_str(args, "room");
+                let sort_by = get_str(args, "sort_by").unwrap_or("relevance");
                 let results = self
                     .db
-                    .search(query, limit, wing, room, self.embedder.as_ref())?;
+                    .search(query, limit, wing, room, self.embedder.as_ref(), sort_by)?;
                 Ok(serde_json::to_string(&results)?)
             }
 

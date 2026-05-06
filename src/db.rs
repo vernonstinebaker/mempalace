@@ -274,10 +274,15 @@ impl Database {
         wing: Option<&str>,
         room: Option<&str>,
         embedder: Option<&Embedder>,
+        sort_by: &str,
     ) -> Result<Value> {
+        if sort_by == "recency" {
+            return self.search_recent(query, limit, wing, room);
+        }
+        let use_recency = sort_by == "hybrid";
         // Hybrid: vector + FTS5 BM25 fused via Reciprocal Rank Fusion
         if let Some(emb) = embedder {
-            return self.search_hybrid(query, limit, wing, room, emb);
+            return self.search_hybrid(query, limit, wing, room, emb, use_recency);
         }
         // No embedder — pure FTS5 fallback
         self.fts_search(query, limit, wing, room)
@@ -316,10 +321,10 @@ impl Database {
         fetch: usize,
         wing: Option<&str>,
         room: Option<&str>,
-    ) -> Vec<(String, String, String, String, f64)> {
+    ) -> Vec<(String, String, String, String, String, f64)> {
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
         let sql = format!(
-            "SELECT d.id, d.wing, d.room, d.content, v.distance
+            "SELECT d.id, d.wing, d.room, d.content, d.filed_at, v.distance
              FROM vec_drawers v
              JOIN drawers d ON v.rowid = d.rowid
              WHERE v.embedding MATCH ?1 AND k = {fetch}{filter_sql}
@@ -342,7 +347,8 @@ impl Database {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
-                    row.get(4)?,
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    row.get(5)?,
                 ))
             },
         )
@@ -360,7 +366,7 @@ impl Database {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
         let sql = format!(
-            "SELECT d.id, d.wing, d.room, d.content, rank
+            "SELECT d.id, d.wing, d.room, d.content, d.filed_at, rank
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
              WHERE drawers_fts MATCH ?1{filter_sql}
@@ -375,8 +381,8 @@ impl Database {
         let mut all_params = vec![SqlValue::Text(safe_query)];
         all_params.extend(filter_params);
 
-        let rows_result: rusqlite::Result<Vec<(String, String, String, String, f64)>> = stmt
-            .query_map(
+        let rows_result: rusqlite::Result<Vec<(String, String, String, String, String, f64)>> =
+            stmt.query_map(
                 rusqlite::params_from_iter(all_params.iter()),
                 |row| {
                     Ok((
@@ -384,7 +390,8 @@ impl Database {
                         row.get(1)?,
                         row.get(2)?,
                         row.get(3)?,
-                        row.get(4)?,
+                        row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                        row.get(5)?,
                     ))
                 },
             )
@@ -392,12 +399,13 @@ impl Database {
 
         let mut results = Vec::new();
         if let Ok(rows) = rows_result {
-            for (id, w, r, content, rank) in rows {
+            for (id, w, r, content, filed_at, rank) in rows {
                 results.push(json!({
                     "id": id,
                     "wing": w,
                     "room": r,
                     "content": content,
+                    "filed_at": filed_at,
                     "rank": rank,
                 }));
             }
@@ -412,11 +420,11 @@ impl Database {
         fetch: usize,
         wing: Option<&str>,
         room: Option<&str>,
-    ) -> Vec<(String, String, String, String)> {
+    ) -> Vec<(String, String, String, String, String)> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
         let sql = format!(
-            "SELECT d.id, d.wing, d.room, d.content
+            "SELECT d.id, d.wing, d.room, d.content, d.filed_at
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
              WHERE drawers_fts MATCH ?1{filter_sql}
@@ -439,6 +447,7 @@ impl Database {
                     row.get(1)?,
                     row.get(2)?,
                     row.get(3)?,
+                    row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                 ))
             },
         )
@@ -453,6 +462,7 @@ impl Database {
         wing: Option<&str>,
         room: Option<&str>,
         embedder: &Embedder,
+        use_recency: bool,
     ) -> Result<Value> {
         use std::collections::HashMap;
         const K: f64 = 60.0; // standard RRF k parameter
@@ -474,17 +484,34 @@ impl Database {
 
         // RRF: score(doc) = sum of 1/(K + rank_i + 1) across all lists
         let mut rrf_scores: HashMap<String, f64> = HashMap::new();
-        let mut meta: HashMap<String, (String, String, String)> = HashMap::new();
+        // meta: (wing, room, content, filed_at)
+        let mut meta: HashMap<String, (String, String, String, String)> = HashMap::new();
 
-        for (i, (id, w, r, c, _dist)) in vec_hits.iter().enumerate() {
+        for (i, (id, w, r, c, ft, _dist)) in vec_hits.iter().enumerate() {
             *rrf_scores.entry(id.clone()).or_insert(0.0) += 1.0 / (K + i as f64 + 1.0);
             meta.entry(id.clone())
-                .or_insert_with(|| (w.clone(), r.clone(), c.clone()));
+                .or_insert_with(|| (w.clone(), r.clone(), c.clone(), ft.clone()));
         }
-        for (i, (id, w, r, c)) in fts_hits.iter().enumerate() {
+        for (i, (id, w, r, c, ft)) in fts_hits.iter().enumerate() {
             *rrf_scores.entry(id.clone()).or_insert(0.0) += 1.0 / (K + i as f64 + 1.0);
             meta.entry(id.clone())
-                .or_insert_with(|| (w.clone(), r.clone(), c.clone()));
+                .or_insert_with(|| (w.clone(), r.clone(), c.clone(), ft.clone()));
+        }
+
+        // Apply recency decay if enabled
+        if use_recency {
+            let now = Self::now_epoch_secs();
+            let half_life = Self::recency_half_life();
+            let weight = Self::recency_weight();
+
+            for (id, score) in rrf_scores.iter_mut() {
+                if let Some((_, _, _, filed_at)) = meta.get(id) {
+                    if let Some(age_secs) = parse_filed_at_age(filed_at, now) {
+                        let boost = 1.0 / (1.0 + age_secs / half_life);
+                        *score *= 1.0 + weight * boost;
+                    }
+                }
+            }
         }
 
         let mut ranked: Vec<(String, f64)> = rrf_scores.into_iter().collect();
@@ -494,12 +521,92 @@ impl Database {
             .into_iter()
             .take(limit)
             .filter_map(|(id, score)| {
-                let (w, r, c) = meta.get(&id)?;
-                Some(json!({"id": id, "wing": w, "room": r, "content": c, "rank": score}))
+                let (w, r, c, ft) = meta.get(&id)?;
+                Some(json!({"id": id, "wing": w, "room": r, "content": c, "filed_at": ft, "rank": score}))
             })
             .collect();
 
         Ok(Value::Array(results))
+    }
+
+    /// Search purely by recency (newest first), using FTS5 MATCH as a filter.
+    fn search_recent(
+        &self,
+        query: &str,
+        limit: usize,
+        wing: Option<&str>,
+        room: Option<&str>,
+    ) -> Result<Value> {
+        let safe_query = sanitize_fts_query(query);
+        let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
+        let sql = format!(
+            "SELECT d.id, d.wing, d.room, d.content, d.filed_at
+             FROM drawers_fts
+             JOIN drawers d ON drawers_fts.rowid = d.rowid
+             WHERE drawers_fts MATCH ?1{filter_sql}
+             ORDER BY d.filed_at DESC LIMIT {limit}"
+        );
+
+        let mut stmt = match self.conn.prepare(&sql) {
+            Ok(s) => s,
+            Err(_) => return Ok(Value::Array(vec![])),
+        };
+
+        let mut all_params = vec![SqlValue::Text(safe_query)];
+        all_params.extend(filter_params);
+
+        let rows_result: rusqlite::Result<Vec<(String, String, String, String, String)>> = stmt
+            .query_map(
+                rusqlite::params_from_iter(all_params.iter()),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                    ))
+                },
+            )
+            .and_then(|iter| iter.collect());
+
+        let mut results = Vec::new();
+        if let Ok(rows) = rows_result {
+            for (id, w, r, content, filed_at) in rows {
+                results.push(json!({
+                    "id": id,
+                    "wing": w,
+                    "room": r,
+                    "content": content,
+                    "filed_at": filed_at,
+                    "rank": 0.0,
+                }));
+            }
+        }
+
+        Ok(Value::Array(results))
+    }
+
+    /// Current unix timestamp in seconds (for recency decay).
+    fn now_epoch_secs() -> f64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64()
+    }
+
+    fn recency_half_life() -> f64 {
+        std::env::var("MEMPALACE_RECENCY_HALF_LIFE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(86400.0) // 24 hours
+    }
+
+    fn recency_weight() -> f64 {
+        std::env::var("MEMPALACE_RECENCY_WEIGHT")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.3)
     }
 
     // ── check_duplicate ───────────────────────────────────────────────────────
@@ -1233,6 +1340,37 @@ impl Database {
     }
 }
 
+/// Parse a `filed_at` string (format "YYYY-MM-DD HH:MM:SS" or ISO) into seconds
+/// since epoch, then return the age relative to `now_secs`. Returns None on parse failure.
+fn parse_filed_at_age(filed_at: &str, now_secs: f64) -> Option<f64> {
+    if filed_at.is_empty() {
+        return None;
+    }
+    let ts = filed_at.trim();
+    // Normalize: try ISO 8601 or "YYYY-MM-DD HH:MM:SS"
+    let normalized: String = ts.replace('T', " ");
+    let parts: Vec<&str> = normalized.split(&[' ', '-', ':'][..]).collect();
+
+    if parts.len() < 3 {
+        return None;
+    }
+
+    let year: i32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+    let hour: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let min: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let sec: u32 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+
+    // days from 1970-01-01 (simplified: assume all months are ~30.44 days)
+    let days = (year - 1970) as f64 * 365.25
+        + (month - 1) as f64 * 30.44
+        + day as f64;
+    let epoch_secs = days * 86400.0 + hour as f64 * 3600.0 + min as f64 * 60.0 + sec as f64;
+
+    Some((now_secs - epoch_secs).max(0.0))
+}
+
 // ── FTS5 query sanitization ───────────────────────────────────────────────────
 
 fn sanitize_fts_query(query: &str) -> String {
@@ -1572,7 +1710,9 @@ mod tests {
             .unwrap();
         db.add_drawer("w", "r", "some unrelated stuff", None, "test", None)
             .unwrap();
-        let results = db.search("quick fox", 5, None, None, None).unwrap();
+        let results = db
+            .search("quick fox", 5, None, None, None, "relevance")
+            .unwrap();
         let arr = results.as_array().unwrap();
         assert!(!arr.is_empty());
         let first = &arr[0];
@@ -1585,7 +1725,7 @@ mod tests {
         db.add_drawer("w", "r", "hello world", None, "test", None)
             .unwrap();
         let results = db
-            .search("zzzznotpresentzzzz", 5, None, None, None)
+            .search("zzzznotpresentzzzz", 5, None, None, None, "relevance")
             .unwrap();
         let arr = results.as_array().unwrap();
         assert!(arr.is_empty());
@@ -1598,7 +1738,7 @@ mod tests {
             .unwrap();
         db.add_drawer("beta", "r", "shared keyword", None, "test", None)
             .unwrap();
-        let results = db.search("shared", 10, Some("alpha"), None, None).unwrap();
+        let results = db.search("shared", 10, Some("alpha"), None, None, "relevance").unwrap();
         let arr = results.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["wing"].as_str().unwrap(), "alpha");
@@ -1612,7 +1752,7 @@ mod tests {
         db.add_drawer("w", "garden", "planting tips", None, "test", None)
             .unwrap();
         let results = db
-            .search("recipe", 10, None, Some("kitchen"), None)
+            .search("recipe", 10, None, Some("kitchen"), None, "relevance")
             .unwrap();
         let arr = results.as_array().unwrap();
         assert_eq!(arr.len(), 1);
@@ -1633,7 +1773,7 @@ mod tests {
             )
             .unwrap();
         }
-        let results = db.search("common", 3, None, None, None).unwrap();
+        let results = db.search("common", 3, None, None, None, "relevance").unwrap();
         let arr = results.as_array().unwrap();
         assert_eq!(arr.len(), 3);
     }
@@ -1911,12 +2051,12 @@ mod tests {
         db.update_drawer(&id, "new refreshed content", None, None, None)
             .unwrap();
         // Search for new text via FTS
-        let results = db.search("refreshed", 5, None, None, None).unwrap();
+        let results = db.search("refreshed", 5, None, None, None, "relevance").unwrap();
         let arr = results.as_array().unwrap();
         assert!(!arr.is_empty());
         assert!(arr[0]["content"].as_str().unwrap().contains("refreshed"));
         // Old text should not match
-        let old_results = db.search("old text", 5, None, None, None).unwrap();
+        let old_results = db.search("old text", 5, None, None, None, "relevance").unwrap();
         assert!(old_results.as_array().unwrap().is_empty());
     }
 
@@ -2042,10 +2182,96 @@ mod tests {
         assert!(stats["total_rooms"].as_i64().unwrap() > 0);
         assert!(stats["total_wings"].as_i64().unwrap() > 0);
         assert!(stats["total_drawers"].as_i64().unwrap() > 0);
-        // room1 appears in both wings → is a tunnel
         assert!(stats["tunnel_rooms"].as_i64().unwrap() >= 1);
         assert!(stats["total_edges"].as_i64().unwrap() >= 1);
         assert!(stats["rooms_per_wing"].as_object().is_some());
         assert!(stats["top_tunnels"].as_array().is_some());
+    }
+
+    // ── recency search ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_sort_by_recency() {
+        let (_dir, db) = test_db();
+        // Insert drawers with staggered filed_at via direct SQL (bypassing datetime('now'))
+        for i in 0..5 {
+            db.conn
+                .execute(
+                    "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    params![
+                        format!("recency_test_{i}"),
+                        "w",
+                        "r",
+                        "a common keyword for search",
+                        format!("2024-0{}-01 00:00:00", i + 1),
+                    ],
+                )
+                .unwrap();
+        }
+        // Index in FTS
+        db.conn
+            .execute(
+                "INSERT INTO drawers_fts(rowid, content, wing, room)
+             SELECT rowid, content, wing, room FROM drawers",
+                [],
+            )
+            .unwrap();
+
+        let results = db
+            .search("common keyword", 5, None, None, None, "recency")
+            .unwrap();
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 5);
+        // Most recent first: 2024-05-01, then 2024-04-01, ...
+        assert!(arr[0]["filed_at"].as_str().unwrap().contains("2024-05"));
+        assert!(arr[4]["filed_at"].as_str().unwrap().contains("2024-01"));
+    }
+
+    #[test]
+    fn test_search_sort_by_relevance_preserved() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r1", "specific rare term alpha", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "r2", "some other unrelated text", None, "test", None)
+            .unwrap();
+        let results = db
+            .search("alpha", 2, None, None, None, "relevance")
+            .unwrap();
+        let arr = results.as_array().unwrap();
+        assert!(arr[0]["room"] == "r1");
+    }
+
+    #[test]
+    fn test_search_result_includes_filed_at() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "test filed_at presence", None, "test", None)
+            .unwrap();
+        let results = db
+            .search("filed_at presence", 1, None, None, None, "relevance")
+            .unwrap();
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert!(arr[0]["filed_at"].as_str().is_some());
+        assert!(!arr[0]["filed_at"].as_str().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_parse_filed_at_age_now() {
+        // A date far in the future should give large negative age, but we clamp to 0
+        let age = parse_filed_at_age("2099-01-01 00:00:00", 1_000_000_000.0);
+        assert!(age.is_none() || age.unwrap() == 0.0);
+    }
+
+    #[test]
+    fn test_parse_filed_at_age_past() {
+        // 2020-01-01 00:00:00 relative to now should be > 0
+        let age = parse_filed_at_age("2020-01-01 00:00:00", 2_000_000_000.0);
+        assert!(age.is_some());
+        assert!(age.unwrap() > 0.0);
+    }
+
+    #[test]
+    fn test_parse_filed_at_age_empty() {
+        assert!(parse_filed_at_age("", 0.0).is_none());
     }
 }

@@ -8,12 +8,12 @@ each phase independently shippable.
 | Dimension        | Current | Target | Phase that fixes it |
 |------------------|---------|--------|---------------------|
 | Search quality   | B+      | A+     | Phase 3             |
-| Architecture     | A-      | A+     | Phase 2             |
-| Test coverage    | F       | A+     | Phase 1             |
-| Code quality     | B       | A+     | Phase 2             |
+| Architecture     | A- → A  | A+     | Phase 2 ✓           |
+| Test coverage    | F  → D  | A+     | Phase 1 ✓           |
+| Code quality     | B  → A- | A+     | Phase 2 ✓           |
 | Feature completeness | C  | A+     | Phases 4–6         |
 | Import pipeline  | B+      | A+     | Phases 4–5         |
-| Error handling   | B-      | A+     | Phase 1             |
+| Error handling   | B- → B  | A+     | Phase 1 ✓           |
 
 ---
 
@@ -133,51 +133,27 @@ cargo fmt -- --check    # clean
 The pattern `match (wing, room) { (Some(w), Some(r)) => ..., (Some(w), None) => ..., ... }`
 appears in 6 places across `db.rs`. Unify it.
 
-- [ ] Create a query builder helper in `db.rs`:
-  ```rust
-  struct SearchQuery {
-      base_sql: String,      // "SELECT ... FROM ... WHERE embedding MATCH ?1 AND k = {fetch}"
-      params: Vec<Box<dyn rusqlite::types::ToSql>>,
-  }
-
-  impl SearchQuery {
-      fn new(base_sql_template: &str) -> Self;
-      fn filter_wing(&mut self, wing: &str);
-      fn filter_room(&mut self, room: &str);
-      fn with_limit(&mut self, limit: usize);
-      fn execute_vector(&self, conn: &Connection, vec_bytes: &[u8]) -> Result<Vec<...>>;
-      fn execute_fts(&self, conn: &Connection, query: &str) -> Result<Vec<...>>;
-  }
-  ```
-- [ ] Refactor `fts_search`, `fts_search_raw`, `vector_search_raw`, and
+- [x] Create a query builder helper in `db.rs`: `build_filter_clause(wing, room, idx_start)` that returns `(sql_fragment, Vec<SqlValue>)`.
+- [x] Refactor `fts_search`, `fts_search_raw`, `vector_search_raw`, and
   `search_hybrid` to use this helper. Delete the old duplicated arms.
-- [ ] Remove `#[allow(dead_code)]` from `vector_search`. Either use it in the
-  search path or delete it.
-- [ ] Verify: `cargo test --release` still green, no behavior change.
+- [x] Remove `#[allow(dead_code)]` from `vector_search`. Delete the function entirely (it was 100+ lines of dead code).
+- [x] Verify: `cargo test --release` still green, no behavior change. (89 tests pass)
 
 ### 2.2 Move graph tool logic from mcp.rs to db.rs
 
-Currently `tool_traverse`, `tool_find_tunnels`, and `tool_graph_stats` live
-entirely in `mcp.rs` with inline SQL — violating the MCP Tool Guidelines
-("Implement core logic in `db.rs`").
-
-- [ ] Move `tool_traverse` logic to `db.rs` as `pub fn traverse(start_room, max_hops) -> Result<Value>`
-- [ ] Move `tool_find_tunnels` logic to `db.rs` as `pub fn find_tunnels(wing_a, wing_b) -> Result<Value>`
-- [ ] Move `tool_graph_stats` logic to `db.rs` as `pub fn get_graph_stats() -> Result<Value>`
-- [ ] In `mcp.rs`, each tool handler becomes a 2-line delegation:
-  ```rust
-  "mempalace_traverse" => {
-      let result = self.db.traverse(start_room, max_hops)?;
-      Ok(serde_json::to_string(&result)?)
-  }
-  ```
-- [ ] Write tests for the moved functions in `db.rs`:
-  - [ ] `test_traverse_existing_room` — returns that room at hop 0
-  - [ ] `test_traverse_missing_room` — returns error with suggestions
-  - [ ] `test_traverse_max_hops` — respects hop limit
-  - [ ] `test_find_tunnels_between_two_wings` — returns rooms spanning both
-  - [ ] `test_find_tunnels_no_wings` — returns all multi-wing rooms
-  - [ ] `test_graph_stats` — returns expected keys (total_rooms, total_edges, etc.)
+- [x] Move `tool_traverse` logic to `db.rs` as `pub fn traverse(start_room, max_hops) -> Result<Value>`
+- [x] Move `tool_find_tunnels` logic to `db.rs` as `pub fn find_tunnels(wing_a, wing_b) -> Result<Value>`
+- [x] Move `tool_graph_stats` logic to `db.rs` as `pub fn graph_stats() -> Result<Value>`
+- [x] In `mcp.rs`, each tool handler now delegates to `self.db.*()` in 2 lines.
+- [x] Write tests for the moved functions in `db.rs`:
+  - [x] `test_traverse_existing_room` — returns that room at hop 0
+  - [x] `test_traverse_missing_room` — returns error with suggestions
+  - [x] `test_traverse_respects_max_hops` — respects hop limit
+  - [x] `test_find_tunnels_between_two_wings` — returns rooms spanning both
+  - [x] `test_find_tunnels_no_filter` — returns all multi-wing rooms
+  - [x] `test_find_tunnels_no_matches` — returns empty when no shared rooms
+  - [x] `test_graph_stats` — returns expected keys (total_rooms, total_edges, etc.)
+- [x] Removed unused `HashMap`/`HashSet` imports from mcp.rs.
 
 **Phase 2 completion check:**
 ```
