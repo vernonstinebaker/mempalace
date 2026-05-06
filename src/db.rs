@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 use crate::embed::Embedder;
+use crate::log::log;
 
 pub struct Database {
     pub conn: Connection,
@@ -215,7 +216,7 @@ impl Database {
                     }
                     Err(e) => {
                         if !first_vec_error_logged {
-                            eprintln!("  [backfill] add_embedding error (rowid={rowid}): {e}");
+                            log!("warn", "[backfill] add_embedding error (rowid={rowid}): {e}");
                             first_vec_error_logged = true;
                         }
                         failed += 1;
@@ -223,20 +224,24 @@ impl Database {
                 }
             } else {
                 if !first_embed_error_logged {
-                    eprintln!("  [backfill] embed() returned None (rowid={rowid})");
+                    log!("warn", "[backfill] embed() returned None (rowid={rowid})");
                     first_embed_error_logged = true;
                 }
                 failed += 1;
             }
             if (i + 1) % 500 == 0 {
-                eprintln!(
-                    "  backfill: {}/{total} (embedded={embedded} failed={failed})",
+                log!(
+                    "info",
+                    "backfill: {}/{total} (embedded={embedded} failed={failed})",
                     i + 1
                 );
             }
         }
 
-        eprintln!("  backfill done: total={total} embedded={embedded} failed={failed}");
+        log!(
+            "info",
+            "backfill done: total={total} embedded={embedded} failed={failed}"
+        );
         Ok((total, embedded, failed))
     }
 
@@ -1172,5 +1177,668 @@ fn sanitize_fts_query(query: &str) -> String {
         query.to_string()
     } else {
         tokens.join(" OR ")
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // Helper: create a fresh test palace in a temp directory
+    fn test_db() -> (TempDir, Database) {
+        let dir = TempDir::new().unwrap();
+        let db = Database::open(dir.path().to_str().unwrap()).unwrap();
+        (dir, db)
+    }
+
+    // ── Database open & schema ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_open_creates_tables() {
+        let (_dir, db) = test_db();
+        // drawers, drawers_fts, triples must always exist.
+        // vec_drawers only exists if sqlite-vec extension is loaded.
+        let required: &[&str] = &["drawers", "drawers_fts", "triples", "vec_embedded"];
+        for name in required {
+            let exists: bool = db.conn.query_row(
+                "SELECT COUNT(*) > 0 FROM sqlite_master WHERE type IN ('table','view') AND name = ?1",
+                params![name],
+                |r| r.get(0),
+            ).unwrap();
+            assert!(exists, "expected table {name} to exist");
+        }
+    }
+
+    #[test]
+    fn test_tables_have_expected_columns() {
+        let (_dir, db) = test_db();
+        let cols: Vec<String> = db
+            .conn
+            .prepare("PRAGMA table_info(drawers)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(cols.contains(&"id".to_string()));
+        assert!(cols.contains(&"wing".to_string()));
+        assert!(cols.contains(&"room".to_string()));
+        assert!(cols.contains(&"content".to_string()));
+        assert!(cols.contains(&"source_file".to_string()));
+        assert!(cols.contains(&"added_by".to_string()));
+        assert!(cols.contains(&"filed_at".to_string()));
+    }
+
+    // ── add_drawer ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_add_drawer_basic() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("proj", "notes", "hello world", None, "test", None)
+            .unwrap();
+        assert!(id.starts_with("drawer_"));
+        // Verify in drawers table
+        let content: String = db
+            .conn
+            .query_row(
+                "SELECT content FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "hello world");
+    }
+
+    #[test]
+    fn test_add_drawer_sets_wing_and_room() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("mywing", "myroom", "content", None, "test", None)
+            .unwrap();
+        let (wing, room): (String, String) = db
+            .conn
+            .query_row(
+                "SELECT wing, room FROM drawers WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(wing, "mywing");
+        assert_eq!(room, "myroom");
+    }
+
+    #[test]
+    fn test_add_drawer_idempotent_same_content() {
+        let (_dir, db) = test_db();
+        let id1 = db
+            .add_drawer("w", "r", "same content", None, "test", None)
+            .unwrap();
+        let id2 = db
+            .add_drawer("w", "r", "same content", None, "test", None)
+            .unwrap();
+        assert_eq!(id1, id2);
+        let count = db.get_drawer_count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_add_drawer_different_content_different_id() {
+        let (_dir, db) = test_db();
+        let id1 = db
+            .add_drawer("w", "r", "content A", None, "test", None)
+            .unwrap();
+        let id2 = db
+            .add_drawer("w", "r", "content B", None, "test", None)
+            .unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_add_drawer_different_wing_different_id() {
+        let (_dir, db) = test_db();
+        let id1 = db
+            .add_drawer("wing1", "room", "content", None, "test", None)
+            .unwrap();
+        let id2 = db
+            .add_drawer("wing2", "room", "content", None, "test", None)
+            .unwrap();
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn test_add_drawer_with_source_file() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "content", Some("/path/to/file.rs"), "test", None)
+            .unwrap();
+        let sf: String = db
+            .conn
+            .query_row(
+                "SELECT source_file FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(sf, "/path/to/file.rs");
+    }
+
+    #[test]
+    fn test_add_drawer_filed_at_is_set() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "content", None, "test", None)
+            .unwrap();
+        let filed_at: String = db
+            .conn
+            .query_row(
+                "SELECT filed_at FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(!filed_at.is_empty());
+        // Should be a datetime string (YYYY-MM-DD HH:MM:SS)
+        assert!(filed_at.contains('-'));
+    }
+
+    #[test]
+    fn test_add_drawer_fts_indexed() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "hello unique zigzag", None, "test", None)
+            .unwrap();
+        // Look up the rowid
+        let rowid: i64 = db
+            .conn
+            .query_row(
+                "SELECT rowid FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // Verify FTS index has this rowid
+        let fts_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM drawers_fts WHERE rowid = ?1",
+                params![rowid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 1);
+    }
+
+    // ── get_drawer_count ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_drawer_count_zero() {
+        let (_dir, db) = test_db();
+        assert_eq!(db.get_drawer_count(), 0);
+    }
+
+    #[test]
+    fn test_get_drawer_count_after_inserts() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r1", "c1", None, "test", None).unwrap();
+        db.add_drawer("w", "r2", "c2", None, "test", None).unwrap();
+        db.add_drawer("w", "r3", "c3", None, "test", None).unwrap();
+        assert_eq!(db.get_drawer_count(), 3);
+    }
+
+    // ── delete_drawer ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_delete_drawer() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "content", None, "test", None)
+            .unwrap();
+        assert_eq!(db.get_drawer_count(), 1);
+        db.delete_drawer(&id).unwrap();
+        assert_eq!(db.get_drawer_count(), 0);
+    }
+
+    #[test]
+    fn test_delete_drawer_removes_fts() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "unique text", None, "test", None)
+            .unwrap();
+        let rowid: i64 = db
+            .conn
+            .query_row(
+                "SELECT rowid FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.delete_drawer(&id).unwrap();
+        let fts_count: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM drawers_fts WHERE rowid = ?1",
+                params![rowid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fts_count, 0);
+    }
+
+    #[test]
+    fn test_delete_nonexistent_drawer() {
+        let (_dir, db) = test_db();
+        let result = db.delete_drawer("nonexistent");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("DrawerNotFound"));
+    }
+
+    // ── upsert_drawer ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_upsert_drawer_insert() {
+        let (_dir, db) = test_db();
+        db.upsert_drawer("custom_id_1", "w", "r", "hello upsert", None, "test", None)
+            .unwrap();
+        let count = db.get_drawer_count();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn test_upsert_drawer_replace() {
+        let (_dir, db) = test_db();
+        db.upsert_drawer(
+            "custom_id_2",
+            "wing_a",
+            "room_a",
+            "initial",
+            None,
+            "test",
+            None,
+        )
+        .unwrap();
+        db.upsert_drawer(
+            "custom_id_2",
+            "wing_b",
+            "room_b",
+            "updated",
+            None,
+            "test",
+            None,
+        )
+        .unwrap();
+        // Count should still be 1 (replaced, not added)
+        assert_eq!(db.get_drawer_count(), 1);
+        let (wing, room, content): (String, String, String) = db
+            .conn
+            .query_row(
+                "SELECT wing, room, content FROM drawers WHERE id = 'custom_id_2'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(wing, "wing_b");
+        assert_eq!(room, "room_b");
+        assert_eq!(content, "updated");
+    }
+
+    // ── FTS search ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_fts_search_basic() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "the quick brown fox", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "r", "some unrelated stuff", None, "test", None)
+            .unwrap();
+        let results = db.search("quick fox", 5, None, None, None).unwrap();
+        let arr = results.as_array().unwrap();
+        assert!(!arr.is_empty());
+        let first = &arr[0];
+        assert!(first["content"].as_str().unwrap().contains("quick"));
+    }
+
+    #[test]
+    fn test_fts_search_no_match() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "hello world", None, "test", None)
+            .unwrap();
+        let results = db
+            .search("zzzznotpresentzzzz", 5, None, None, None)
+            .unwrap();
+        let arr = results.as_array().unwrap();
+        assert!(arr.is_empty());
+    }
+
+    #[test]
+    fn test_fts_search_wing_filter() {
+        let (_dir, db) = test_db();
+        db.add_drawer("alpha", "r", "shared keyword", None, "test", None)
+            .unwrap();
+        db.add_drawer("beta", "r", "shared keyword", None, "test", None)
+            .unwrap();
+        let results = db.search("shared", 10, Some("alpha"), None, None).unwrap();
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["wing"].as_str().unwrap(), "alpha");
+    }
+
+    #[test]
+    fn test_fts_search_room_filter() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "kitchen", "recipe ingredients", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "garden", "planting tips", None, "test", None)
+            .unwrap();
+        let results = db
+            .search("recipe", 10, None, Some("kitchen"), None)
+            .unwrap();
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["room"].as_str().unwrap(), "kitchen");
+    }
+
+    #[test]
+    fn test_fts_search_limit() {
+        let (_dir, db) = test_db();
+        for i in 0..10 {
+            db.add_drawer(
+                "w",
+                &format!("r{i}"),
+                &format!("common term {i}"),
+                None,
+                "test",
+                None,
+            )
+            .unwrap();
+        }
+        let results = db.search("common", 3, None, None, None).unwrap();
+        let arr = results.as_array().unwrap();
+        assert_eq!(arr.len(), 3);
+    }
+
+    // ── fts_search sanitize ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_sanitize_fts_query_multi_word() {
+        assert_eq!(
+            sanitize_fts_query("hello world"),
+            "hello OR world".to_string()
+        );
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_single_word() {
+        assert_eq!(sanitize_fts_query("hello"), "hello".to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_three_words() {
+        assert_eq!(sanitize_fts_query("a b c"), "a OR b OR c".to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_empty() {
+        assert_eq!(sanitize_fts_query(""), "".to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_already_has_quotes() {
+        let q = r#""exact phrase""#;
+        assert_eq!(sanitize_fts_query(q), q.to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_already_has_wildcard() {
+        let q = "prefix*";
+        assert_eq!(sanitize_fts_query(q), q.to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_already_has_and() {
+        let q = "foo AND bar";
+        assert_eq!(sanitize_fts_query(q), q.to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_already_has_or() {
+        let q = "foo OR bar";
+        assert_eq!(sanitize_fts_query(q), q.to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_already_has_parentheses() {
+        let q = "(hello world)";
+        assert_eq!(sanitize_fts_query(q), q.to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_whitespace_only() {
+        // Whitespace-only input: split_whitespace yields empty vec, len=0 <= 1,
+        // so the original query is returned as-is.
+        assert_eq!(sanitize_fts_query("   "), "   ".to_string());
+    }
+
+    // ── bulk_replace ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_bulk_replace_basic() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r1", "hello old world", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "r2", "goodbye old friend", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "r3", "nothing to change", None, "test", None)
+            .unwrap();
+        let updated = db.bulk_replace("old", "new", None, None).unwrap();
+        assert_eq!(updated, 2);
+        // Verify content changed
+        let c1: String = db
+            .conn
+            .query_row(
+                "SELECT content FROM drawers WHERE wing='w' AND room='r1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(c1, "hello new world");
+    }
+
+    #[test]
+    fn test_bulk_replace_no_match() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "nothing here", None, "test", None)
+            .unwrap();
+        let updated = db.bulk_replace("zzz", "yyy", None, None).unwrap();
+        assert_eq!(updated, 0);
+    }
+
+    #[test]
+    fn test_bulk_replace_wing_filter() {
+        let (_dir, db) = test_db();
+        db.add_drawer("wing1", "r", "replace me", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing2", "r", "replace me", None, "test", None)
+            .unwrap();
+        let updated = db
+            .bulk_replace("replace", "done", Some("wing1"), None)
+            .unwrap();
+        assert_eq!(updated, 1);
+    }
+
+    // ── wing / room / taxonomy ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_wing_counts() {
+        let (_dir, db) = test_db();
+        db.add_drawer("foo", "a", "c", None, "test", None).unwrap();
+        db.add_drawer("foo", "b", "c", None, "test", None).unwrap();
+        db.add_drawer("bar", "x", "c", None, "test", None).unwrap();
+        let counts = db.get_wing_counts().unwrap();
+        let map = counts.as_object().unwrap();
+        assert_eq!(map["foo"].as_i64().unwrap(), 2);
+        assert_eq!(map["bar"].as_i64().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_room_counts() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "bedroom", "c", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "kitchen", "c", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "bedroom", "c2", None, "test", None)
+            .unwrap();
+        let counts = db.get_room_counts(Some("w")).unwrap();
+        let map = counts.as_object().unwrap();
+        assert_eq!(map["bedroom"].as_i64().unwrap(), 2);
+        assert_eq!(map["kitchen"].as_i64().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_taxonomy() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w1", "r1", "c", None, "test", None).unwrap();
+        db.add_drawer("w1", "r2", "c", None, "test", None).unwrap();
+        db.add_drawer("w2", "r1", "c", None, "test", None).unwrap();
+        let tax = db.get_taxonomy().unwrap();
+        let map = tax.as_object().unwrap();
+        assert!(map.contains_key("w1"));
+        assert!(map.contains_key("w2"));
+    }
+
+    // ── diary ───────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_diary_entries_empty() {
+        let (_dir, db) = test_db();
+        let data = db.get_diary_entries("nonexistent", 10).unwrap();
+        let entries = data["entries"].as_array().unwrap();
+        assert!(entries.is_empty());
+        assert_eq!(data["total"].as_i64().unwrap(), 0);
+    }
+
+    #[test]
+    fn test_get_diary_entries_with_data() {
+        let (_dir, db) = test_db();
+        // diary entries are filed as wing="wing_X", room="diary"
+        db.add_drawer(
+            "wing_testagent",
+            "diary",
+            "[general] logged something",
+            None,
+            "testagent",
+            None,
+        )
+        .unwrap();
+        db.add_drawer(
+            "wing_testagent",
+            "diary",
+            "[code] wrote a function",
+            None,
+            "testagent",
+            None,
+        )
+        .unwrap();
+        let data = db.get_diary_entries("wing_testagent", 10).unwrap();
+        let entries = data["entries"].as_array().unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(data["showing"].as_i64().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_get_diary_topic_parsing() {
+        let (_dir, db) = test_db();
+        db.add_drawer(
+            "wing_testagent",
+            "diary",
+            "[debug] fixed a crash",
+            None,
+            "testagent",
+            None,
+        )
+        .unwrap();
+        let data = db.get_diary_entries("wing_testagent", 1).unwrap();
+        let entries = data["entries"].as_array().unwrap();
+        let entry = &entries[0];
+        assert_eq!(entry["topic"].as_str().unwrap(), "debug");
+        assert_eq!(entry["content"].as_str().unwrap(), "fixed a crash");
+    }
+
+    // ── update_drawer ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_update_drawer_content() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "original", None, "test", None)
+            .unwrap();
+        db.update_drawer(&id, "modified", None, None, None).unwrap();
+        let content: String = db
+            .conn
+            .query_row(
+                "SELECT content FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(content, "modified");
+    }
+
+    #[test]
+    fn test_update_drawer_wing_and_room() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "content", None, "test", None)
+            .unwrap();
+        db.update_drawer(&id, "content", Some("new_wing"), Some("new_room"), None)
+            .unwrap();
+        let (wing, room): (String, String) = db
+            .conn
+            .query_row(
+                "SELECT wing, room FROM drawers WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(wing, "new_wing");
+        assert_eq!(room, "new_room");
+    }
+
+    #[test]
+    fn test_update_drawer_nonexistent() {
+        let (_dir, db) = test_db();
+        let result = db.update_drawer("nonexistent", "content", None, None, None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("DrawerNotFound"));
+    }
+
+    #[test]
+    fn test_update_drawer_re_indexes_fts() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "old text here", None, "test", None)
+            .unwrap();
+        let _rowid: i64 = db
+            .conn
+            .query_row(
+                "SELECT rowid FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        db.update_drawer(&id, "new refreshed content", None, None, None)
+            .unwrap();
+        // Search for new text via FTS
+        let results = db.search("refreshed", 5, None, None, None).unwrap();
+        let arr = results.as_array().unwrap();
+        assert!(!arr.is_empty());
+        assert!(arr[0]["content"].as_str().unwrap().contains("refreshed"));
+        // Old text should not match
+        let old_results = db.search("old text", 5, None, None, None).unwrap();
+        assert!(old_results.as_array().unwrap().is_empty());
     }
 }

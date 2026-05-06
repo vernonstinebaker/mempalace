@@ -89,8 +89,37 @@ When adding or modifying tools in `src/mcp.rs`:
   conn.execute_batch("PRAGMA synchronous=FULL; PRAGMA journal_mode=WAL;")?;
   ```
 
-### Testing
-- Add unit tests in `db.rs` using `#[cfg(test)] mod tests { ... }`
+### Testing (TDD Required)
+
+This project follows **Test-Driven Development**:
+
+1. **Write a failing test first.**
+   - Every new feature, bug fix, or behavior change MUST begin with a failing test.
+   - Tests live in `#[cfg(test)] mod tests { ... }` within the file being changed.
+   - Use `tempfile::TempDir` for test databases (add `tempfile` as a `[dev-dependency]` in Cargo.toml).
+
+2. **Write the minimum code to make it pass.**
+   - Only write enough production code to satisfy the test.
+   - Do not pre-emptively add features not covered by tests.
+
+3. **Refactor with confidence.**
+   - After green, clean up: extract helpers, reduce duplication, improve names.
+   - The test suite is your safety net — if it stays green, the behavior is preserved.
+
+4. **Test categories:**
+   - **Unit tests**: Test individual functions in isolation (e.g., `sanitize_fts_query`, `slugify`, embedding dimensions).
+   - **Integration tests**: Test database operations end-to-end (create table → insert → search → delete).
+   - **Edge cases**: Empty strings, Unicode (CJK, emoji), extremely long inputs (>1MB), null bytes, concurrent access.
+   - **Error paths**: Invalid inputs, missing required args, database corrupted/missing.
+
+5. **Red-Green-Refactor checklist per commit:**
+   - [ ] Failing test written and confirmed failing
+   - [ ] Production code written, test passes
+   - [ ] `cargo fmt` and `cargo clippy -- -D warnings` clean
+   - [ ] All existing tests still pass
+   - [ ] No new `unwrap()` or `expect()` in library code
+
+- Add unit tests in `db.rs`, `embed.rs`, `knowledge_graph.rs`, `import_sessions.rs`, `indexer.rs` using `#[cfg(test)] mod tests { ... }`
 - Use temporary directories via `tempfile::TempDir`
 - Test both success and error paths
 - Test concurrent access if relevant
@@ -158,3 +187,13 @@ When adding or modifying tools in `src/mcp.rs`:
 - Ask: does this change preserve the single-binary guarantee?
 - Ask: would this break if deployed to a fresh VM with only Rust installed?
 - Remember: the goal is a reliable, embeddable memory system — not a feature-rich research prototype
+
+## 📋 ROADMAP.md Tracking
+
+- The project roadmap lives at `ROADMAP.md` in the repo root.
+- Every time a phase or individual step is completed, update the corresponding
+  `- [ ]` checkbox to `- [x]` in ROADMAP.md.
+- When all steps in a phase are checked, update the Status Dashboard at the
+  top of ROADMAP.md to reflect the new grade for that dimension.
+- The roadmap is the single source of truth for project progress — keep it and
+  AGENTS.md in sync.

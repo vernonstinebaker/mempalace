@@ -3,6 +3,7 @@ use rusqlite::{params, Connection};
 
 use crate::db::Database;
 use crate::embed::Embedder;
+use crate::log::log;
 
 /// Import OpenCode sessions from opencode.db into the palace.
 /// Each session becomes one drawer: wing="opencode", room=slugified title.
@@ -32,8 +33,7 @@ pub fn import_sessions(
                 directory: row.get::<_, Option<String>>(2)?.unwrap_or_default(),
             })
         })?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<rusqlite::Result<Vec<_>>>()?;
 
     let mut count = 0usize;
 
@@ -88,7 +88,7 @@ pub fn import_sessions(
             embedder,
         ) {
             Ok(_) => count += 1,
-            Err(e) => eprintln!("WARN: skipping session {}: {e}", session.id),
+            Err(e) => log!("warn", "skipping session {}: {e}", session.id),
         }
     }
 
@@ -109,15 +109,17 @@ fn collect_assistant_text(conn: &Connection, session_id: &str, max_chars: usize)
                AND json_extract(p.data, '$.type') = 'text'
                ORDER BY p.rowid ASC";
 
-    let all_parts: Vec<String> = conn
-        .prepare(sql)
-        .ok()
-        .and_then(|mut s| {
-            s.query_map(params![session_id], |r| r.get::<_, String>(0))
-                .ok()
-                .map(|iter| iter.filter_map(|r| r.ok()).collect())
-        })
-        .unwrap_or_default();
+    let all_parts: Vec<String> = match conn.prepare(sql) {
+        Ok(mut stmt) => stmt
+            .query_map(params![session_id], |r| r.get::<_, String>(0))
+            .ok()
+            .map(|iter| iter.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default(),
+        Err(e) => {
+            log!("warn", "prepare failed for session {session_id}: {e}");
+            return String::new();
+        }
+    };
 
     // Extract text content — SQL already filtered for type='text', just get $.text
     let texts: Vec<String> = all_parts
@@ -209,5 +211,58 @@ fn slugify(s: &str) -> String {
         "session".to_string()
     } else {
         result.chars().take(64).collect()
+    }
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slugify_replaces_spaces_with_dashes() {
+        assert_eq!(slugify("Hello World"), "hello-world");
+    }
+
+    #[test]
+    fn test_slugify_collapses_multiple_dashes() {
+        assert_eq!(slugify("a--b"), "a-b");
+    }
+
+    #[test]
+    fn test_slugify_max_64_chars() {
+        let long = "a".repeat(100);
+        let result = slugify(&long);
+        assert!(result.len() <= 64);
+        assert!(result.chars().all(|c| c == 'a'));
+    }
+
+    #[test]
+    fn test_slugify_empty_string() {
+        assert_eq!(slugify(""), "session");
+    }
+
+    #[test]
+    fn test_slugify_special_chars() {
+        // "Session: Memory?" → each char mapped:
+        // S→s, e→e, s→s, s→s, i→i, o→o, n→n, :→-, space→-, M→m, e→e, m→m, o→o, r→r, y→y, ?→-
+        // → "session--memory-" → collapse dashes → "session-memory-" → trim → "session-memory"
+        assert_eq!(slugify("Session: Memory?"), "session-memory");
+    }
+
+    #[test]
+    fn test_slugify_dots_become_dashes() {
+        assert_eq!(slugify("2026-04-07T16:08:41.328Z"), "2026-04-07t16-08-41-328z");
+    }
+
+    #[test]
+    fn test_slugify_leading_trailing_dashes_trimmed() {
+        assert_eq!(slugify("-hello-"), "hello");
+    }
+
+    #[test]
+    fn test_slugify_mixed_case_and_numbers() {
+        assert_eq!(slugify("TestRoom42"), "testroom42");
     }
 }

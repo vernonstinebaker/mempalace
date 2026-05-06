@@ -4,6 +4,7 @@ use walkdir::WalkDir;
 
 use crate::db::Database;
 use crate::embed::Embedder;
+use crate::log::log;
 
 /// Directory names that are always skipped during indexing.
 const SKIP_DIRS: &[&str] = &[
@@ -31,8 +32,8 @@ const SKIP_DIRS: &[&str] = &[
     ".gradle",
     ".idea",
     ".vscode",
-    "Pods",        // iOS CocoaPods
-    "DerivedData", // Xcode
+    "pods",         // iOS CocoaPods
+    "deriveddata", // Xcode
 ];
 
 /// Exact file names (case-insensitive) that are always skipped.
@@ -285,7 +286,7 @@ pub fn index_directory(db: &Database, root: &str, embedder: Option<&Embedder>) -
             embedder,
         ) {
             Ok(_) => count += 1,
-            Err(e) => eprintln!("WARN: skipping {}: {e}", path.display()),
+            Err(e) => log!("warn", "skipping {}: {e}", path.display()),
         }
     }
 
@@ -304,4 +305,80 @@ fn slugify_path(path: &Path) -> String {
         .collect::<String>()
         .trim_matches('-')
         .to_string()
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_slugify_path_simple() {
+        let p = std::path::Path::new("src/db.rs");
+        assert_eq!(slugify_path(p), "src-db-rs");
+    }
+
+    #[test]
+    fn test_slugify_path_complex() {
+        let p = std::path::Path::new("projects/nested/deep/file.go");
+        assert_eq!(slugify_path(p), "projects-nested-deep-file-go");
+    }
+
+    #[test]
+    fn test_slugify_path_extensionless() {
+        let p = std::path::Path::new("Makefile");
+        assert_eq!(slugify_path(p), "makefile");
+    }
+
+    #[test]
+    fn test_slugify_path_hidden_file() {
+        let p = std::path::Path::new(".gitignore");
+        // "." → "-", then "gitignore" → "gitignore"
+        // Combined: "-gitignore" → trim_matches('-') → "gitignore"
+        assert_eq!(slugify_path(p), "gitignore");
+    }
+
+    #[test]
+    fn test_active_extensions_default() {
+        let exts = active_extensions();
+        // Core extensions should always be present
+        assert!(exts.contains(&"rs".to_string()));
+        assert!(exts.contains(&"py".to_string()));
+        assert!(exts.contains(&"go".to_string()));
+        assert!(exts.contains(&"md".to_string()));
+        assert!(exts.contains(&"js".to_string()));
+        assert!(exts.contains(&"txt".to_string()));
+    }
+
+    #[test]
+    fn test_active_extensions_env_override() {
+        std::env::set_var("MEMPALACE_EXTENSIONS", "go,py");
+        let exts = active_extensions();
+        std::env::remove_var("MEMPALACE_EXTENSIONS");
+        assert_eq!(exts, vec!["go".to_string(), "py".to_string()]);
+    }
+
+    #[test]
+    fn test_active_extensions_empty_env_uses_default() {
+        std::env::set_var("MEMPALACE_EXTENSIONS", "");
+        let exts = active_extensions();
+        std::env::remove_var("MEMPALACE_EXTENSIONS");
+        // Should fall back to default (which is long)
+        assert!(exts.len() > 5);
+    }
+
+    #[test]
+    fn test_skip_dirs_are_lowercase() {
+        for d in SKIP_DIRS {
+            assert_eq!(*d, d.to_lowercase(), "SKIP_DIRS entry '{d}' must be lowercase");
+        }
+    }
+
+    #[test]
+    fn test_skip_files_are_lowercase() {
+        for f in SKIP_FILES {
+            assert_eq!(f, &f.to_lowercase(), "SKIP_FILES must be lowercase");
+        }
+    }
 }

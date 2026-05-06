@@ -7,6 +7,7 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tract_onnx::prelude::tract_ndarray::{s, Array2};
 use tract_onnx::prelude::*;
+use crate::log::log;
 
 pub struct Embedder {
     tokenizer: Tokenizer,
@@ -103,10 +104,10 @@ pub fn try_load_embedder() -> Option<Embedder> {
     if let Ok(dir) = std::env::var("MEMPALACE_MODEL_DIR") {
         match Embedder::load(Path::new(&dir)) {
             Ok(e) => {
-                eprintln!("[embed] loaded from MEMPALACE_MODEL_DIR: {dir}");
+                log!("info", "[embed] loaded from MEMPALACE_MODEL_DIR: {dir}");
                 return Some(e);
             }
-            Err(e) => eprintln!("[embed] MEMPALACE_MODEL_DIR failed ({dir}): {e}"),
+            Err(e) => log!("info", "[embed] MEMPALACE_MODEL_DIR failed ({dir}): {e}"),
         }
     }
 
@@ -117,7 +118,8 @@ pub fn try_load_embedder() -> Option<Embedder> {
             .join("models")
             .join("all-MiniLM-L6-v2");
         if let Ok(e) = Embedder::load(&candidate) {
-            eprintln!(
+            log!(
+                "info",
                 "[embed] loaded from palace sibling: {}",
                 candidate.display()
             );
@@ -135,13 +137,126 @@ pub fn try_load_embedder() -> Option<Embedder> {
             .join("onnx");
         match Embedder::load(&candidate) {
             Ok(e) => {
-                eprintln!("[embed] loaded from ChromaDB path: {}", candidate.display());
+                log!("info", "[embed] loaded from ChromaDB path: {}", candidate.display());
                 return Some(e);
             }
-            Err(e) => eprintln!("[embed] ChromaDB path failed: {e}"),
+            Err(e) => log!("info", "[embed] ChromaDB path failed: {e}"),
         }
     }
 
-    eprintln!("[embed] no embedder found — falling back to FTS5");
+    log!("warn", "[embed] no embedder found — falling back to FTS5");
     None
+}
+
+// ── Tests ──────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Returns Some(Embedder) if the model is available on this machine.
+    fn get_embedder() -> Option<Embedder> {
+        // Check the ChromaDB default path (most likely on macOS dev machines)
+        if let Some(home) = std::env::var_os("HOME") {
+            let candidate = Path::new(&home)
+                .join(".cache")
+                .join("chroma")
+                .join("onnx_models")
+                .join("all-MiniLM-L6-v2")
+                .join("onnx");
+            if candidate.exists() {
+                return Embedder::load(&candidate).ok();
+            }
+        }
+        // Try the env var
+        if let Ok(dir) = std::env::var("MEMPALACE_MODEL_DIR") {
+            return Embedder::load(Path::new(&dir)).ok();
+        }
+        None
+    }
+
+    #[test]
+    fn test_embed_returns_1536_bytes() {
+        let emb = match get_embedder() {
+            Some(e) => e,
+            None => return, // skip if model unavailable
+        };
+        let result = emb.embed("hello world").expect("embed should succeed");
+        assert_eq!(result.len(), 384 * 4, "384 f32 × 4 bytes = 1536");
+    }
+
+    #[test]
+    fn test_embed_deterministic() {
+        let emb = match get_embedder() {
+            Some(e) => e,
+            None => return,
+        };
+        let a = emb.embed("the cat sat on the mat").unwrap();
+        let b = emb.embed("the cat sat on the mat").unwrap();
+        assert_eq!(a, b, "same input must produce same embedding");
+    }
+
+    #[test]
+    fn test_embed_different_inputs_different_outputs() {
+        let emb = match get_embedder() {
+            Some(e) => e,
+            None => return,
+        };
+        let a = emb.embed("cats").unwrap();
+        let b = emb.embed("the earth orbits the sun").unwrap();
+        assert_ne!(a, b, "different inputs should produce different embeddings");
+    }
+
+    #[test]
+    fn test_embed_empty_string() {
+        let emb = match get_embedder() {
+            Some(e) => e,
+            None => return,
+        };
+        // Empty string should produce a valid 1536-byte embedding (not panic)
+        let result = emb.embed("");
+        assert!(result.is_some(), "empty string should produce an embedding");
+        assert_eq!(
+            result.unwrap().len(),
+            1536,
+            "empty string embedding should be 1536 bytes"
+        );
+    }
+
+    #[test]
+    fn test_embed_l2_normalized() {
+        let emb = match get_embedder() {
+            Some(e) => e,
+            None => return,
+        };
+        let bytes = emb.embed("test vector").unwrap();
+        // Decode f32s and check L2 norm ≈ 1.0
+        let mut floats = Vec::with_capacity(384);
+        for chunk in bytes.chunks_exact(4) {
+            let val = f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+            floats.push(val);
+        }
+        let norm: f32 = floats.iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-6,
+            "L2 norm should be 1.0, got {norm}"
+        );
+    }
+
+    #[test]
+    fn test_embed_unicode() {
+        let emb = match get_embedder() {
+            Some(e) => e,
+            None => return,
+        };
+        // CJK text
+        let result = emb.embed("こんにちは世界");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 1536);
+
+        // Emoji
+        let result = emb.embed("🚀✨🔥");
+        assert!(result.is_some());
+        assert_eq!(result.unwrap().len(), 1536);
+    }
 }

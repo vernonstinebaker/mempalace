@@ -4,8 +4,10 @@ mod import_palace;
 mod import_sessions;
 mod indexer;
 mod knowledge_graph;
+mod log;
 mod mcp;
 
+use crate::log::log;
 use rusqlite::ffi::sqlite3_auto_extension;
 use sqlite_vec::sqlite3_vec_init;
 
@@ -49,7 +51,7 @@ fn main() {
             let palace_dir = get_palace_dir();
             let db = db::Database::open(&palace_dir).expect("Failed to open database");
             let embedder = embed::try_load_embedder();
-            eprintln!("Indexing: {target_dir}");
+            log!("info", "Indexing: {target_dir}");
             let count = indexer::index_directory(&db, target_dir, embedder.as_ref())
                 .expect("Indexing failed");
             println!("Indexed {count} files");
@@ -68,7 +70,7 @@ fn main() {
             let palace_dir = get_palace_dir();
             let db = db::Database::open(&palace_dir).expect("Failed to open database");
             let embedder = embed::try_load_embedder();
-            eprintln!("Importing sessions from: {oc_db_path}");
+            log!("info", "Importing sessions from: {oc_db_path}");
             let count = import_sessions::import_sessions(&db, &oc_db_path, embedder.as_ref())
                 .expect("Session import failed");
             println!("Imported {count} sessions");
@@ -81,7 +83,7 @@ fn main() {
                 .expect("Usage: mempalace import-palace <source_palace.db>");
             let palace_dir = get_palace_dir();
             let db = db::Database::open(&palace_dir).expect("Failed to open database");
-            eprintln!("Importing palace from: {source_path}");
+            log!("info", "Importing palace from: {source_path}");
             let (drawers, triples) =
                 import_palace::import_palace(&db, source_path).expect("Palace import failed");
             println!("Imported {drawers} drawers, {triples} triples");
@@ -93,13 +95,13 @@ fn main() {
             let db = db::Database::open(&palace_dir).expect("Failed to open database");
             match embed::try_load_embedder() {
                 Some(embedder) => {
-                    eprintln!("Backfilling embeddings...");
+                    log!("info", "Backfilling embeddings...");
                     let (total, embedded, failed) =
                         db.backfill_embeddings(&embedder).expect("Backfill failed");
                     println!("Backfill complete: {embedded}/{total} embedded, {failed} failed");
                 }
                 None => {
-                    eprintln!("ERROR: no embedder found — cannot reindex");
+                    log!("error", "no embedder found — cannot reindex");
                     std::process::exit(1);
                 }
             }
