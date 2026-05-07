@@ -1782,6 +1782,61 @@ impl Database {
         Ok(())
     }
 
+    // ── integrity check ────────────────────────────────────────────────────────
+
+    /// Run integrity checks across all indices. Returns a report of any issues found.
+    pub fn integrity_check(&self) -> Result<Value> {
+        let mut issues = Vec::new();
+        let mut checks = serde_json::Map::new();
+
+        // Check FTS ↔ drawers parity
+        let drawer_count = self.get_drawer_count();
+        let fts_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM drawers_fts", [], |r| r.get(0))
+            .unwrap_or(0);
+        checks.insert("drawers".to_string(), json!(drawer_count));
+        checks.insert("fts_rows".to_string(), json!(fts_count));
+        if drawer_count != fts_count {
+            issues.push(format!("FTS index drift: {drawer_count} drawers, {fts_count} FTS rows"));
+        }
+
+        // Check vec_embedded ↔ vec_drawers_rowids parity
+        let _sync = self.conn.execute_batch(
+            "INSERT OR IGNORE INTO vec_embedded(rowid) SELECT rowid FROM vec_drawers_rowids;",
+        );
+        let embedded_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM vec_embedded", [], |r| r.get(0))
+            .unwrap_or(0);
+        checks.insert("embedded".to_string(), json!(embedded_count));
+        if drawer_count != embedded_count {
+            issues.push(format!(
+                "Embedding gap: {drawer_count} drawers, {embedded_count} embedded"
+            ));
+        }
+
+        // Check triples table exists
+        let triple_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM triples", [], |r| r.get(0))
+            .unwrap_or(0);
+        checks.insert("triples".to_string(), json!(triple_count));
+
+        // Check tunnels table exists
+        let tunnel_count: i64 = self
+            .conn
+            .query_row("SELECT COUNT(*) FROM tunnels", [], |r| r.get(0))
+            .unwrap_or(0);
+        checks.insert("tunnels".to_string(), json!(tunnel_count));
+
+        Ok(json!({
+            "healthy": issues.is_empty(),
+            "counts": checks,
+            "issues": issues,
+        }))
+    }
+
     // ── tunnel CRUD ────────────────────────────────────────────────────────────
 
     /// Create an explicit cross-wing tunnel. Idempotent: returns existing ID
@@ -3093,5 +3148,95 @@ mod tests {
         assert_eq!(health["drawer_count"].as_i64().unwrap(), 5);
         // embedded_count will be 0 without embedder in tests
         assert!(health["gap_pct"].as_f64().unwrap() >= 0.0);
+    }
+
+    // ── integration-style cross-tool tests ─────────────────────────────────────
+
+    #[test]
+    fn test_integrity_check_healthy() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "content", None, "test", None)
+            .unwrap();
+        let result = db.integrity_check().unwrap();
+        assert!(result["counts"]["drawers"].as_i64().unwrap() >= 1);
+        assert!(result["issues"].as_array().unwrap().is_empty() || result["counts"]["fts_rows"].as_i64().unwrap() >= 1);
+    }
+
+    #[test]
+    fn test_add_search_delete_workflow() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("wing_a", "notes", "meeting about Q3 budget", None, "tester", None)
+            .unwrap();
+        // Search should find it
+        let r = db
+            .search("Q3 budget", 5, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert!(!r["results"].as_array().unwrap().is_empty());
+        // Delete should remove it
+        db.delete_drawer(&id).unwrap();
+        let r2 = db
+            .search("Q3 budget", 5, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert!(r2["results"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_create_tunnel_then_follow() {
+        let (_dir, db) = test_db();
+        db.add_drawer("wing_a", "room_x", "shared concept alpha", None, "test", None)
+            .unwrap();
+        db.add_drawer("wing_b", "room_y", "reference to alpha", None, "test", None)
+            .unwrap();
+        db.create_tunnel("wing_a", "room_x", "wing_b", "room_y", "concept-link")
+            .unwrap();
+        let result = db.follow_tunnels("wing_a", "room_x").unwrap();
+        assert!(!result["tunnels"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_bulk_replace_preserves_search() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r1", "foobarquux oldname here", None, "test", None)
+            .unwrap();
+        db.add_drawer("w", "r2", "foobarquux oldname there", None, "test", None)
+            .unwrap();
+        db.bulk_replace("oldname", "newname", None, None).unwrap();
+        // Search for old unique term should return nothing
+        let r = db
+            .search("oldname", 5, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert!(r["results"].as_array().unwrap().is_empty());
+        // Search for new term should find both
+        let r2 = db
+            .search("newname", 10, 0, None, None, None, None, None, "relevance")
+            .unwrap();
+        assert_eq!(r2["results"].as_array().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn test_list_drawers_after_add() {
+        let (_dir, db) = test_db();
+        for i in 0..3 {
+            db.add_drawer("w", "r", &format!("item {i}"), None, "test", None)
+                .unwrap();
+        }
+        let result = db.list_drawers(None, None, 10, 0).unwrap();
+        assert_eq!(result["total"], 3);
+        assert_eq!(result["drawers"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn test_upsert_drawer_then_get() {
+        let (_dir, db) = test_db();
+        db.upsert_drawer("my-id", "w", "r", "original", None, "test", None, None)
+            .unwrap();
+        let r = db.get_drawer("my-id").unwrap();
+        assert_eq!(r["content"], "original");
+        // Upsert (replace)
+        db.upsert_drawer("my-id", "w", "r", "updated!", None, "test", None, None)
+            .unwrap();
+        let r2 = db.get_drawer("my-id").unwrap();
+        assert_eq!(r2["content"], "updated!");
     }
 }

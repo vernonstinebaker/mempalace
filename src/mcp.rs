@@ -80,7 +80,8 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_delete_tunnel","description":"Delete an explicit cross-wing tunnel by ID.","inputSchema":{"type":"object","properties":{"tunnel_id":{"type":"string","description":"Tunnel ID to delete"}},"required":["tunnel_id"]}},"#,
     r#"{"name":"mempalace_follow_tunnels","description":"Follow explicit tunnels from a wing/room to see connected ideas in other wings.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing name"},"room":{"type":"string","description":"Room name"}},"required":["wing","room"]}},"#,
     r#"{"name":"mempalace_get_drawer","description":"Fetch a single drawer by ID with full content and metadata.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to fetch"}},"required":["drawer_id"]}},"#,
-    r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"}}}}"#,
+    r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"}}}},"#,
+    r#"{"name":"mempalace_integrity","description":"Run integrity checks across all indices (FTS, vectors, triples, tunnels). Returns health report with any issues found.","inputSchema":{"type":"object","properties":{}}}"#,
     "]"
 );
 
@@ -275,6 +276,10 @@ impl<'a> Server<'a> {
                 let source_closet = get_str(args, "source_closet");
                 let triple_id =
                     kg.add_triple(subject, predicate, object, valid_from, valid_to, source_closet)?;
+                wal::log_write("kg_add", json!({
+                    "subject": subject, "predicate": predicate, "object": object,
+                    "triple_id": triple_id,
+                }));
                 let fact_str = format!("{subject} \u{2192} {predicate} \u{2192} {object}");
                 Ok(serde_json::to_string(&json!({
                     "success": true,
@@ -293,6 +298,9 @@ impl<'a> Server<'a> {
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: object"))?;
                 let ended = validate::sanitize_iso_date(get_str(args, "ended"))?;
                 kg.invalidate(subject, predicate, object, ended)?;
+                wal::log_write("kg_invalidate", json!({
+                    "subject": subject, "predicate": predicate, "object": object, "ended": ended,
+                }));
                 let fact_str = format!("{subject} \u{2192} {predicate} \u{2192} {object}");
                 Ok(serde_json::to_string(&json!({
                     "success": true,
@@ -467,10 +475,15 @@ impl<'a> Server<'a> {
                     new_room,
                     self.embedder.as_ref(),
                 ) {
-                    Ok(()) => Ok(serde_json::to_string(&json!({
-                        "success": true,
-                        "drawer_id": drawer_id,
-                    }))?),
+                    Ok(()) => {
+                        wal::log_write("update_drawer", json!({
+                            "drawer_id": drawer_id, "wing": new_wing, "room": new_room,
+                        }));
+                        Ok(serde_json::to_string(&json!({
+                            "success": true,
+                            "drawer_id": drawer_id,
+                        }))?)
+                    }
                     Err(e) if e.to_string().contains("DrawerNotFound") => {
                         Ok(serde_json::to_string(&json!({
                             "success": false,
@@ -492,6 +505,9 @@ impl<'a> Server<'a> {
                 let count = self
                     .db
                     .bulk_replace(find, replace, wing, self.embedder.as_ref())?;
+                wal::log_write("bulk_replace", json!({
+                    "find": find, "replace": replace, "wing": wing, "updated": count,
+                }));
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "updated": count,
@@ -520,6 +536,9 @@ impl<'a> Server<'a> {
                     agent_name,
                     self.embedder.as_ref(),
                 )?;
+                wal::log_write("diary_write", json!({
+                    "agent": agent_name, "topic": topic, "entry_id": drawer_id,
+                }));
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "entry_id": drawer_id,
@@ -748,6 +767,12 @@ impl<'a> Server<'a> {
                 let limit = limit.clamp(1, 100);
                 let offset = get_i64(args, "offset").unwrap_or(0) as usize;
                 let result = self.db.list_drawers(wing, room, limit, offset)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_integrity ────────────────────────────────────────────
+            "mempalace_integrity" => {
+                let result = self.db.integrity_check()?;
                 Ok(serde_json::to_string(&result)?)
             }
 
