@@ -212,7 +212,8 @@ impl<'a> Server<'a> {
                 });
                 if self.db.vector_disabled {
                     result["vector_disabled"] = json!(true);
-                    result["hint"] = json!("Run mempalace_repair to re-index and restore vector search");
+                    result["hint"] =
+                        json!("Run mempalace_repair to re-index and restore vector search");
                 }
                 Ok(serde_json::to_string(&result)?)
             }
@@ -274,12 +275,21 @@ impl<'a> Server<'a> {
                 let valid_from = validate::sanitize_iso_date(get_str(args, "valid_from"))?;
                 let valid_to = validate::sanitize_iso_date(get_str(args, "valid_to"))?;
                 let source_closet = get_str(args, "source_closet");
-                let triple_id =
-                    kg.add_triple(subject, predicate, object, valid_from, valid_to, source_closet)?;
-                wal::log_write("kg_add", json!({
-                    "subject": subject, "predicate": predicate, "object": object,
-                    "triple_id": triple_id,
-                }));
+                let triple_id = kg.add_triple(
+                    subject,
+                    predicate,
+                    object,
+                    valid_from,
+                    valid_to,
+                    source_closet,
+                )?;
+                wal::log_write(
+                    "kg_add",
+                    json!({
+                        "subject": subject, "predicate": predicate, "object": object,
+                        "triple_id": triple_id,
+                    }),
+                );
                 let fact_str = format!("{subject} \u{2192} {predicate} \u{2192} {object}");
                 Ok(serde_json::to_string(&json!({
                     "success": true,
@@ -298,9 +308,12 @@ impl<'a> Server<'a> {
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: object"))?;
                 let ended = validate::sanitize_iso_date(get_str(args, "ended"))?;
                 kg.invalidate(subject, predicate, object, ended)?;
-                wal::log_write("kg_invalidate", json!({
-                    "subject": subject, "predicate": predicate, "object": object, "ended": ended,
-                }));
+                wal::log_write(
+                    "kg_invalidate",
+                    json!({
+                        "subject": subject, "predicate": predicate, "object": object, "ended": ended,
+                    }),
+                );
                 let fact_str = format!("{subject} \u{2192} {predicate} \u{2192} {object}");
                 Ok(serde_json::to_string(&json!({
                     "success": true,
@@ -362,8 +375,15 @@ impl<'a> Server<'a> {
                 let filed_before = validate::sanitize_iso_date(get_str(args, "filed_before"))?;
                 let sort_by = get_str(args, "sort_by").unwrap_or("relevance");
                 let results = self.db.search(
-                    query, limit, offset, wing, room, filed_after, filed_before,
-                    self.embedder.as_ref(), sort_by,
+                    query,
+                    limit,
+                    offset,
+                    wing,
+                    room,
+                    filed_after,
+                    filed_before,
+                    self.embedder.as_ref(),
+                    sort_by,
                 )?;
                 Ok(serde_json::to_string(&results)?)
             }
@@ -422,10 +442,13 @@ impl<'a> Server<'a> {
                     added_by,
                     self.embedder.as_ref(),
                 )?;
-                wal::log_write("add_drawer", json!({
-                    "wing": wing, "room": room, "content": content,
-                    "drawer_id": drawer_id, "added_by": added_by,
-                }));
+                wal::log_write(
+                    "add_drawer",
+                    json!({
+                        "wing": wing, "room": room, "content": content,
+                        "drawer_id": drawer_id, "added_by": added_by,
+                    }),
+                );
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "drawer_id": drawer_id,
@@ -440,10 +463,7 @@ impl<'a> Server<'a> {
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: drawer_id"))?;
                 match self.db.delete_drawer(drawer_id) {
                     Ok(()) => {
-                        wal::log_write(
-                            "delete_drawer",
-                            json!({"drawer_id": drawer_id}),
-                        );
+                        wal::log_write("delete_drawer", json!({"drawer_id": drawer_id}));
                         Ok(serde_json::to_string(&json!({
                             "success": true,
                             "drawer_id": drawer_id,
@@ -476,9 +496,12 @@ impl<'a> Server<'a> {
                     self.embedder.as_ref(),
                 ) {
                     Ok(()) => {
-                        wal::log_write("update_drawer", json!({
-                            "drawer_id": drawer_id, "wing": new_wing, "room": new_room,
-                        }));
+                        wal::log_write(
+                            "update_drawer",
+                            json!({
+                                "drawer_id": drawer_id, "wing": new_wing, "room": new_room,
+                            }),
+                        );
                         Ok(serde_json::to_string(&json!({
                             "success": true,
                             "drawer_id": drawer_id,
@@ -505,9 +528,12 @@ impl<'a> Server<'a> {
                 let count = self
                     .db
                     .bulk_replace(find, replace, wing, self.embedder.as_ref())?;
-                wal::log_write("bulk_replace", json!({
-                    "find": find, "replace": replace, "wing": wing, "updated": count,
-                }));
+                wal::log_write(
+                    "bulk_replace",
+                    json!({
+                        "find": find, "replace": replace, "wing": wing, "updated": count,
+                    }),
+                );
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "updated": count,
@@ -536,9 +562,12 @@ impl<'a> Server<'a> {
                     agent_name,
                     self.embedder.as_ref(),
                 )?;
-                wal::log_write("diary_write", json!({
-                    "agent": agent_name, "topic": topic, "entry_id": drawer_id,
-                }));
+                wal::log_write(
+                    "diary_write",
+                    json!({
+                        "agent": agent_name, "topic": topic, "entry_id": drawer_id,
+                    }),
+                );
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "entry_id": drawer_id,
@@ -570,22 +599,15 @@ impl<'a> Server<'a> {
             // ── mempalace_import_sessions ─────────────────────────────────────
             "mempalace_import_sessions" => {
                 let oc_db_path = get_str(args, "oc_db_path").unwrap_or("");
-                let full = args
-                    .get("full")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false);
+                let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
                 let path = if oc_db_path.is_empty() {
                     let home = std::env::var("HOME").unwrap_or_default();
                     format!("{home}/.local/share/opencode/opencode.db")
                 } else {
                     oc_db_path.to_string()
                 };
-                let count = import_sessions::import_sessions(
-                    self.db,
-                    &path,
-                    self.embedder.as_ref(),
-                    full,
-                )?;
+                let count =
+                    import_sessions::import_sessions(self.db, &path, self.embedder.as_ref(), full)?;
                 Ok(serde_json::to_string(&json!({
                     "success": true,
                     "imported": count,
@@ -642,13 +664,11 @@ impl<'a> Server<'a> {
 
             // ── mempalace_repair ────────────────────────────────────────────────
             "mempalace_repair" => {
-                let (total, embedded, _failed) = self
-                    .db
-                    .backfill_embeddings(
-                        self.embedder
-                            .as_ref()
-                            .ok_or_else(|| anyhow::anyhow!("Embedder required for repair"))?,
-                    )?;
+                let (total, embedded, _failed) = self.db.backfill_embeddings(
+                    self.embedder
+                        .as_ref()
+                        .ok_or_else(|| anyhow::anyhow!("Embedder required for repair"))?,
+                )?;
                 // Re-probe health after repair
                 let health = self.db.vec0_health();
                 Ok(serde_json::to_string(&json!({
@@ -661,9 +681,10 @@ impl<'a> Server<'a> {
 
             // ── mempalace_reconnect ─────────────────────────────────────────────
             "mempalace_reconnect" => {
-                let _ = self.db.conn.execute_batch(
-                    "INSERT INTO drawers_fts(drawers_fts) VALUES('rebuild');",
-                );
+                let _ = self
+                    .db
+                    .conn
+                    .execute_batch("INSERT INTO drawers_fts(drawers_fts) VALUES('rebuild');");
                 let health = self.db.vec0_health();
                 Ok(serde_json::to_string(&json!({
                     "success": true,

@@ -408,7 +408,10 @@ mod tests {
 
     #[test]
     fn test_slugify_dots_become_dashes() {
-        assert_eq!(slugify("2026-04-07T16:08:41.328Z"), "2026-04-07t16-08-41-328z");
+        assert_eq!(
+            slugify("2026-04-07T16:08:41.328Z"),
+            "2026-04-07t16-08-41-328z"
+        );
     }
 
     #[test]

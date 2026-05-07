@@ -10,7 +10,14 @@ use serde_json::{json, Value};
 
 use crate::log;
 
-const REDACT_KEYS: &[&str] = &["content", "query", "entry", "text", "document", "content_preview"];
+const REDACT_KEYS: &[&str] = &[
+    "content",
+    "query",
+    "entry",
+    "text",
+    "document",
+    "content_preview",
+];
 
 static WAL: LazyLock<WalLogger> = LazyLock::new(|| {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -81,7 +88,11 @@ impl WalLogger {
             "params": safe_params,
         });
 
-        match OpenOptions::new().append(true).create(true).open(&self.path) {
+        match OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&self.path)
+        {
             Ok(mut f) => {
                 let line = serde_json::to_string(&entry).unwrap_or_default();
                 let _ = writeln!(f, "{line}");
@@ -197,7 +208,10 @@ mod tests {
 
     #[test]
     fn test_wal_global_write_and_read() {
-        let test_op = format!("test_{}", std::time::UNIX_EPOCH.elapsed().unwrap().as_millis());
+        let test_op = format!(
+            "test_{}",
+            std::time::UNIX_EPOCH.elapsed().unwrap().as_millis()
+        );
         log_write(&test_op, json!({"key": "val", "content": "secret"}));
         let entries = read_entries(100);
         let found = entries.iter().any(|e| e["operation"] == test_op);

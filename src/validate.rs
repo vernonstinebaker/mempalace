@@ -78,9 +78,7 @@ pub fn sanitize_iso_date<'a>(val: Option<&'a str>) -> anyhow::Result<Option<&'a 
     }
 
     if parts.len() > 6 {
-        return Err(anyhow::anyhow!(
-            "Too many date components in: '{s}'"
-        ));
+        return Err(anyhow::anyhow!("Too many date components in: '{s}'"));
     }
 
     Ok(Some(s))
@@ -103,10 +101,7 @@ pub fn sanitize_name<'a>(
 
 /// Validate a required name (not optional — empty string is rejected).
 #[allow(clippy::needless_lifetimes)]
-pub fn sanitize_name_required<'a>(
-    val: &'a str,
-    field_name: &str,
-) -> anyhow::Result<&'a str> {
+pub fn sanitize_name_required<'a>(val: &'a str, field_name: &str) -> anyhow::Result<&'a str> {
     if val.is_empty() {
         return Err(anyhow::anyhow!("{field_name} must not be empty"));
     }
@@ -116,9 +111,7 @@ pub fn sanitize_name_required<'a>(
 
 fn validate_name_str(s: &str, field_name: &str) -> anyhow::Result<()> {
     if s.len() > 256 {
-        return Err(anyhow::anyhow!(
-            "{field_name} exceeds 256 character limit"
-        ));
+        return Err(anyhow::anyhow!("{field_name} exceeds 256 character limit"));
     }
     if s.contains('\0') {
         return Err(anyhow::anyhow!("{field_name} contains null byte"));

@@ -1,3 +1,4 @@
+use crate::log::log;
 /// Pure-Rust ONNX embedding using tract-onnx + HuggingFace tokenizers.
 /// Loads all-MiniLM-L6-v2 (384-dim) and produces L2-normalised float32 vectors.
 /// Returns None on any failure so callers can gracefully fall back to FTS5.
@@ -7,7 +8,6 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tract_onnx::prelude::tract_ndarray::{s, Array2};
 use tract_onnx::prelude::*;
-use crate::log::log;
 
 pub struct Embedder {
     tokenizer: Tokenizer,
@@ -137,7 +137,11 @@ pub fn try_load_embedder() -> Option<Embedder> {
             .join("onnx");
         match Embedder::load(&candidate) {
             Ok(e) => {
-                log!("info", "[embed] loaded from ChromaDB path: {}", candidate.display());
+                log!(
+                    "info",
+                    "[embed] loaded from ChromaDB path: {}",
+                    candidate.display()
+                );
                 return Some(e);
             }
             Err(e) => log!("info", "[embed] ChromaDB path failed: {e}"),

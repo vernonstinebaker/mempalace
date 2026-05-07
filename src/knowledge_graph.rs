@@ -336,7 +336,14 @@ mod tests {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
         let id = kg
-            .add_triple("Max", "started_school", "Year 7", Some("2026-09-01"), None, None)
+            .add_triple(
+                "Max",
+                "started_school",
+                "Year 7",
+                Some("2026-09-01"),
+                None,
+                None,
+            )
             .unwrap();
         let vf: String = db
             .conn
@@ -375,9 +382,7 @@ mod tests {
             .unwrap();
         kg.add_triple("Bob", "child_of", "Charlie", None, None, None)
             .unwrap();
-        let facts = kg
-            .query_entity("Alice", None, "outgoing")
-            .unwrap();
+        let facts = kg.query_entity("Alice", None, "outgoing").unwrap();
         let arr = facts.as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["subject"], "Alice");
@@ -486,8 +491,7 @@ mod tests {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
         kg.add_triple("A", "p", "B", None, None, None).unwrap();
-        kg.invalidate("A", "p", "B", Some("2025-01-01"))
-            .unwrap();
+        kg.invalidate("A", "p", "B", Some("2025-01-01")).unwrap();
         let stats = kg.get_stats().unwrap();
         assert_eq!(stats["total_triples"], 1);
         assert_eq!(stats["current_facts"], 0);
@@ -499,7 +503,14 @@ mod tests {
         let (_dir, db) = test_db();
         let kg = KnowledgeGraph::new(&db);
         let id = kg
-            .add_triple("Alice", "worked_at", "ACME", Some("2020-01-01"), Some("2023-12-31"), None)
+            .add_triple(
+                "Alice",
+                "worked_at",
+                "ACME",
+                Some("2020-01-01"),
+                Some("2023-12-31"),
+                None,
+            )
             .unwrap();
         // Verify valid_until is set
         let vu: Option<String> = db

@@ -3,10 +3,7 @@
 
 /// Check if debug-level logging is enabled via RUST_LOG env var.
 pub(crate) fn debug_enabled() -> bool {
-    matches!(
-        std::env::var("RUST_LOG").as_deref(),
-        Ok("debug" | "trace")
-    )
+    matches!(std::env::var("RUST_LOG").as_deref(), Ok("debug" | "trace"))
 }
 
 /// Log a message at the given level. Level: "info", "warn", "error", "debug".

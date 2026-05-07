@@ -32,7 +32,7 @@ const SKIP_DIRS: &[&str] = &[
     ".gradle",
     ".idea",
     ".vscode",
-    "pods",         // iOS CocoaPods
+    "pods",        // iOS CocoaPods
     "deriveddata", // Xcode
 ];
 
@@ -371,7 +371,11 @@ mod tests {
     #[test]
     fn test_skip_dirs_are_lowercase() {
         for d in SKIP_DIRS {
-            assert_eq!(*d, d.to_lowercase(), "SKIP_DIRS entry '{d}' must be lowercase");
+            assert_eq!(
+                *d,
+                d.to_lowercase(),
+                "SKIP_DIRS entry '{d}' must be lowercase"
+            );
         }
     }
 

@@ -81,9 +81,8 @@ fn main() {
             let db = db::Database::open(&palace_dir).expect("Failed to open database");
             let embedder = embed::try_load_embedder();
             log!("info", "Importing sessions from: {oc_db_path}");
-            let count =
-                import_sessions::import_sessions(&db, &oc_db_path, embedder.as_ref(), full)
-                    .expect("Session import failed");
+            let count = import_sessions::import_sessions(&db, &oc_db_path, embedder.as_ref(), full)
+                .expect("Session import failed");
             println!("Imported {count} sessions");
         }
 
