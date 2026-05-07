@@ -6,6 +6,12 @@ use std::path::Path;
 use crate::embed::Embedder;
 use crate::log::log;
 
+// Type aliases for search result tuples (reduces type_complexity)
+type FtsResultRow = (String, String, String, String, String, f64);
+type FtsRawRow = (String, String, String, String, String);
+type VecResultRow = (String, String, String, String, String, f64);
+type DrawerMeta = (String, String, String, Option<String>, Option<String>);
+
 pub struct Database {
     pub conn: Connection,
     pub vector_disabled: bool,
@@ -401,6 +407,7 @@ impl Database {
 
     // ── search ────────────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     pub fn search(
         &self,
         query: &str,
@@ -475,6 +482,7 @@ impl Database {
         (sql, params)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fts_search(
         &self,
         query: &str,
@@ -532,7 +540,7 @@ impl Database {
         all_params.extend(filter_params);
         all_params.extend(date_params);
 
-        let rows_result: rusqlite::Result<Vec<(String, String, String, String, String, f64)>> =
+        let rows_result: rusqlite::Result<Vec<FtsResultRow>> =
             stmt.query_map(
                 rusqlite::params_from_iter(all_params.iter()),
                 |row| {
@@ -570,6 +578,7 @@ impl Database {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fts_search_raw(
         &self,
         query: &str,
@@ -578,7 +587,7 @@ impl Database {
         room: Option<&str>,
         filed_after: Option<&str>,
         filed_before: Option<&str>,
-    ) -> Vec<(String, String, String, String, String)> {
+    ) -> Vec<FtsRawRow> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
         let (date_sql, date_params) = Self::build_date_clause(
@@ -619,6 +628,7 @@ impl Database {
         .unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn vector_search_raw(
         &self,
         vec_bytes: &[u8],
@@ -627,7 +637,7 @@ impl Database {
         room: Option<&str>,
         filed_after: Option<&str>,
         filed_before: Option<&str>,
-    ) -> Vec<(String, String, String, String, String, f64)> {
+    ) -> Vec<VecResultRow> {
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
         let (date_sql, date_params) = Self::build_date_clause(
             filed_after,
@@ -668,6 +678,7 @@ impl Database {
         .unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_hybrid(
         &self,
         query: &str,
@@ -755,6 +766,7 @@ impl Database {
         }))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_recent(
         &self,
         query: &str,
@@ -812,7 +824,7 @@ impl Database {
         all_params.extend(filter_params);
         all_params.extend(date_params);
 
-        let rows_result: rusqlite::Result<Vec<(String, String, String, String, String)>> = stmt
+        let rows_result: rusqlite::Result<Vec<FtsRawRow>> = stmt
             .query_map(
                 rusqlite::params_from_iter(all_params.iter()),
                 |row| {
@@ -963,6 +975,7 @@ impl Database {
     /// Insert or replace a drawer with a caller-supplied stable ID.
     /// Used by importers (e.g. index-sessions) that want a stable key independent
     /// of content, so re-indexing updated content doesn't create duplicate drawers.
+    #[allow(clippy::too_many_arguments)]
     pub fn upsert_drawer(
         &self,
         id: &str,
@@ -1250,10 +1263,10 @@ impl Database {
                 ts.as_str()
             };
             // Parse [topic] prefix
-            let (topic, body) = if content.starts_with('[') {
-                if let Some(close) = content[1..].find("] ") {
-                    let t = &content[1..1 + close];
-                    let b = &content[1 + close + 2..];
+            let (topic, body) = if let Some(stripped) = content.strip_prefix('[') {
+                if let Some(close) = stripped.find("] ") {
+                    let t = &stripped[..close];
+                    let b = &stripped[close + 2..];
                     (t.to_string(), b.to_string())
                 } else {
                     ("general".to_string(), content.clone())
@@ -1848,7 +1861,7 @@ impl Database {
 
     /// Fetch a single drawer by ID with full content.
     pub fn get_drawer(&self, drawer_id: &str) -> Result<Value> {
-        let row: Option<(String, String, String, Option<String>, Option<String>)> = self.conn.query_row(
+        let row: Option<DrawerMeta> = self.conn.query_row(
             "SELECT wing, room, content, source_file, filed_at FROM drawers WHERE id=?1",
             params![drawer_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),

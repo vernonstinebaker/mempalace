@@ -4,6 +4,16 @@ use serde_json::{json, Value};
 
 use crate::db::Database;
 
+// Type aliases (reduces type_complexity)
+type TripleRow = (
+    String,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
+
 pub struct KnowledgeGraph<'a> {
     pub db: &'a Database,
 }
@@ -44,14 +54,7 @@ impl<'a> KnowledgeGraph<'a> {
         let mut stmt = self.db.conn.prepare(&sql)?;
         let mut facts = Vec::new();
 
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            Option<String>,
-            Option<String>,
-            Option<String>,
-        )> = stmt
+        let rows: Vec<TripleRow> = stmt
             .query_map(params![entity, as_of], |row| {
                 Ok((
                     row.get(0)?,
@@ -168,14 +171,7 @@ impl<'a> KnowledgeGraph<'a> {
                  FROM triples WHERE subject = ?1 OR object = ?1
                  ORDER BY COALESCE(valid_from, '0000-00-00')",
             )?;
-            let rows: Vec<(
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            )> = stmt
+            let rows: Vec<TripleRow> = stmt
                 .query_map(params![e], |row| {
                     Ok((
                         row.get(0)?,
@@ -211,14 +207,7 @@ impl<'a> KnowledgeGraph<'a> {
                 "SELECT subject, predicate, object, valid_from, valid_until, source_closet
                  FROM triples ORDER BY COALESCE(valid_from, '0000-00-00') LIMIT 100",
             )?;
-            let rows: Vec<(
-                String,
-                String,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-            )> = stmt
+            let rows: Vec<TripleRow> = stmt
                 .query_map([], |row| {
                     Ok((
                         row.get(0)?,

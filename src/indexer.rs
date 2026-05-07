@@ -213,7 +213,7 @@ pub fn index_directory(db: &Database, root: &str, embedder: Option<&Embedder>) -
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
 
-        if SKIP_FILES.iter().any(|f| *f == file_name_lower.as_str()) {
+        if SKIP_FILES.contains(&file_name_lower.as_str()) {
             continue;
         }
 

@@ -200,7 +200,7 @@ fn collect_tool_names(conn: &Connection, session_id: &str) -> String {
         Ok(mut stmt) => stmt
             .query_map(params![session_id], |r| r.get::<_, Option<String>>(0))
             .ok()
-            .map(|iter| iter.filter_map(|r| r.ok()).filter_map(|n| n).collect())
+            .map(|iter| iter.filter_map(|r| r.ok().flatten()).collect())
             .unwrap_or_default(),
         Err(_) => return String::new(),
     };

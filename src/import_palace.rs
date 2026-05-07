@@ -59,7 +59,7 @@ pub fn import_palace(db: &Database, source_path: &str) -> Result<(usize, usize)>
                     filed_at,
                 ],
             )?;
-            drawers_imported += changes as usize;
+            drawers_imported += changes;
         }
     }
 
@@ -122,7 +122,7 @@ pub fn import_palace(db: &Database, source_path: &str) -> Result<(usize, usize)>
                     row.source_closet,
                 ],
             )?;
-            triples_imported += changes as usize;
+            triples_imported += changes;
         }
     }
 

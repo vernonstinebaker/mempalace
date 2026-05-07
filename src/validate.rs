@@ -4,6 +4,7 @@
 /// Validate ISO-ish date strings. Accepts: YYYY, YYYY-MM, YYYY-MM-DD,
 /// YYYY-MM-DD HH:MM:SS, empty string, None.
 /// Rejects natural-language dates ("yesterday", "March 2026") and garbage.
+#[allow(clippy::needless_lifetimes)]
 pub fn sanitize_iso_date<'a>(val: Option<&'a str>) -> anyhow::Result<Option<&'a str>> {
     let s = match val {
         None | Some("") => return Ok(None),
@@ -87,6 +88,7 @@ pub fn sanitize_iso_date<'a>(val: Option<&'a str>) -> anyhow::Result<Option<&'a 
 
 /// Validate a wing/room/agent name. Rejects null bytes, control chars,
 /// and strings that are too long.
+#[allow(clippy::needless_lifetimes)]
 pub fn sanitize_name<'a>(
     val: Option<&'a str>,
     field_name: &str,
@@ -100,6 +102,7 @@ pub fn sanitize_name<'a>(
 }
 
 /// Validate a required name (not optional — empty string is rejected).
+#[allow(clippy::needless_lifetimes)]
 pub fn sanitize_name_required<'a>(
     val: &'a str,
     field_name: &str,
@@ -132,6 +135,7 @@ fn validate_name_str(s: &str, field_name: &str) -> anyhow::Result<()> {
 }
 
 /// Validate content string. Rejects null bytes and over-size content.
+#[allow(clippy::needless_lifetimes)]
 pub fn sanitize_content<'a>(val: &'a str) -> anyhow::Result<&'a str> {
     if val.contains('\0') {
         return Err(anyhow::anyhow!("content contains null byte"));
