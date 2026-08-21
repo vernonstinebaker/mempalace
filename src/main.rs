@@ -1,5 +1,6 @@
 mod db;
 mod embed;
+mod hallways;
 mod import_palace;
 mod import_sessions;
 mod indexer;

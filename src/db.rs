@@ -121,6 +121,19 @@ impl Database {
         Self::ensure_column(&self.conn, "triples", "source_file", "TEXT")?;
         Self::ensure_column(&self.conn, "triples", "source_drawer_id", "TEXT")?;
 
+        self.conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS hallways (
+                id TEXT PRIMARY KEY,
+                wing TEXT NOT NULL,
+                entity_a TEXT NOT NULL,
+                entity_b TEXT NOT NULL,
+                co_occurrence_count INTEGER NOT NULL DEFAULT 1,
+                rooms TEXT,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(wing, entity_a, entity_b)
+            );",
+        )?;
+
         Ok(())
     }
 
@@ -1248,6 +1261,7 @@ impl Database {
                     }
                 }
             }
+            let _ = crate::hallways::record_hallways(self, wing, room, content);
         }
 
         Ok(drawer_id)

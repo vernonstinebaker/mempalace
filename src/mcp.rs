@@ -4,6 +4,7 @@ use serde_json::{json, Value};
 
 use crate::db::Database;
 use crate::embed::Embedder;
+use crate::hallways;
 use crate::import_sessions;
 use crate::indexer;
 use crate::knowledge_graph::KnowledgeGraph;
@@ -87,7 +88,9 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_follow_tunnels","description":"Follow explicit tunnels from a wing/room to see connected ideas in other wings.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing name"},"room":{"type":"string","description":"Room name"}},"required":["wing","room"]}},"#,
     r#"{"name":"mempalace_get_drawer","description":"Fetch a single drawer by ID with full content and metadata.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to fetch"}},"required":["drawer_id"]}},"#,
     r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"}}}},"#,
-    r#"{"name":"mempalace_integrity","description":"Run integrity checks across all indices (FTS, vectors, triples, tunnels). Returns health report with any issues found.","inputSchema":{"type":"object","properties":{}}}"#,
+    r#"{"name":"mempalace_integrity","description":"Run integrity checks across all indices (FTS, vectors, triples, tunnels). Returns health report with any issues found.","inputSchema":{"type":"object","properties":{}}},"#,
+    r#"{"name":"mempalace_list_hallways","description":"List structural hallways (entity co-occurrence graph) optionally filtered by wing.","inputSchema":{"type":"object","properties":{"wing":{"type":"string"}}}},"#,
+    r#"{"name":"mempalace_delete_hallway","description":"Delete a hallway by ID.","inputSchema":{"type":"object","properties":{"hallway_id":{"type":"string"}},"required":["hallway_id"]}}"#,
     "]"
 );
 
@@ -964,6 +967,20 @@ impl<'a> Server<'a> {
                 }))?)
             }
 
+            "mempalace_delete_hallway" => {
+                let id = get_str(args, "hallway_id")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: hallway_id"))?;
+                let result = hallways::delete_hallway(self.db, id)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_list_hallways ────────────────────────────────────────
+            "mempalace_list_hallways" => {
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let result = hallways::list_hallways(self.db, wing)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
             _ => Err(anyhow::anyhow!("UnknownTool: {name}")),
         }
     }
@@ -1033,5 +1050,7 @@ mod tests {
         assert!(TOOLS_JSON.contains("mempalace_sync"));
         assert!(TOOLS_JSON.contains("mempalace_mine"));
         assert!(TOOLS_JSON.contains("source_drawer_id"));
+        assert!(TOOLS_JSON.contains("mempalace_list_hallways"));
+        assert!(TOOLS_JSON.contains("mempalace_delete_hallway"));
     }
 }

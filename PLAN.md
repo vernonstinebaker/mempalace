@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `phase_complete` |
-| Active phase | 18 |
-| Active task | 18.1 |
-| Last completed task | 17.5 |
+| Active phase | 19 |
+| Active task | 19.1 |
+| Last completed task | 18.4 |
 | WIP notes | — |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 189 passed (2026-08-21) |
+| Last verification | `cargo test --release` 201 passed (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -493,10 +493,10 @@ No NLP. Extract from drawer content:
 
 Normalize to lowercase, max 64 chars, drop stopwords.
 
-- [ ] `test_extract_urls`
-- [ ] `test_extract_paths`
-- [ ] `test_extract_qualified_idents`
-- [ ] `test_extract_ignores_short_noise` — `a`, `the`, `tmp` not entities
+- [x] `test_extract_urls`
+- [x] `test_extract_paths`
+- [x] `test_extract_qualified_idents`
+- [x] `test_extract_ignores_short_noise` — `a`, `the`, `tmp` not entities
 
 ### 18.2 `hallways` table + increment on write
 
@@ -517,17 +517,17 @@ On each new drawer, for every unordered pair of distinct entities in
 that drawer: upsert, `co_occurrence_count += 1`, merge room into `rooms`.
 Canonical order: `entity_a < entity_b` lexicographically.
 
-- [ ] `test_hallway_created_on_add_drawer`
-- [ ] `test_hallway_increments_on_second_drawer`
-- [ ] `test_hallway_pair_is_canonical_order`
+- [x] `test_hallway_created_on_add_drawer`
+- [x] `test_hallway_increments_on_second_drawer`
+- [x] `test_hallway_pair_is_canonical_order`
 
 ### 18.3 MCP list / delete
 
 `mempalace_list_hallways` (`wing?`) → `{ hallways: [...], count }`.
 `mempalace_delete_hallway` (`hallway_id`) → `{ success, deleted }`.
 
-- [ ] `test_list_hallways_filter_wing`
-- [ ] `test_delete_hallway`
+- [x] `test_list_hallways_filter_wing`
+- [x] `test_delete_hallway`
 
 ### 18.4 Auto-promote tunnels (conservative)
 
@@ -536,9 +536,9 @@ create an explicit tunnel between the rooms with the highest
 co-occurrence in each wing. Label: `entity:<name>`. Idempotent via
 existing `create_tunnel`.
 
-- [ ] `test_auto_tunnel_when_entity_in_two_wings`
-- [ ] `test_auto_tunnel_idempotent`
-- [ ] `test_auto_tunnel_not_created_for_single_wing`
+- [x] `test_auto_tunnel_when_entity_in_two_wings`
+- [x] `test_auto_tunnel_idempotent`
+- [x] `test_auto_tunnel_not_created_for_single_wing`
 
 **Do not** implement Hebbian decay in this phase (Parking lot).
 
@@ -981,6 +981,12 @@ R@5 ≥ 94.04% floor holds; log both scores.
 - tests added: checkpoint, delete_by_source, sync, mine, tunnel drawer IDs
 - suite: `cargo test --release` → 189 passed
 - notes: dry-run defaults; mine wraps indexer::index_directory_with
+
+
+### 2026-08-21 — task 18.1–18.4 — hallways
+
+- tests added: extract urls/paths/idents, hallway CRUD, auto-tunnels
+- suite: `cargo test --release` → 201 passed
 
 ## Parking lot
 
