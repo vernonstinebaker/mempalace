@@ -10,6 +10,7 @@ build:
 # Note: if OpenCode (or another client) already has the old binary running,
 # kill that process first before invoking the new one, or just restart the client.
 install: build
+	rm -f "$(INSTALL_PATH)"
 	cp "$(abspath $(BINARY))" "$(INSTALL_PATH)"
 	@echo "Installed: $(INSTALL_PATH)"
 

@@ -13,7 +13,7 @@ Inspired by [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempala
 - **Deterministic IDs** – content-addressed drawer IDs for deduplication
 - **Agent diary compression** – AAAK format for efficient session logging
 
-This implementation is **v3.1.0**. User-turns LongMemEval R@5 was **94.04%** before the Phase 15 ranking work (sanitizer, keyword/phrase boosts, recency tie-break). Re-run `bench/longmemeval_rust_useronly.py` when the dataset is available; we do not special-case LongMemEval question IDs.
+This implementation is **v3.1.0** (49 MCP tools). User-turns LongMemEval R@5 was **94.04%** before the Phase 15 ranking work (sanitizer, keyword/phrase boosts, recency tie-break). Re-run `bench/longmemeval_rust_useronly.py` when the dataset is available; we do not special-case LongMemEval question IDs. LoCoMo: `python bench/locomo_rust.py` (synthetic baseline n=2 R@5=100%; pass `--data` for the official JSON).
 
 ## 🔑 Key Design Decisions
 
@@ -44,7 +44,7 @@ This mirrors the rigor of academic hybrid retrieval while staying within the sin
 - Separate tables for triples (knowledge graph) and diary entries
 
 ### 4. **MCP-First Tool Design**
-All 44 tools follow MCP conventions:
+All 49 tools follow MCP conventions:
 - Consistent JSON-RPC over stdio transport
 - Rich inputSchema validation
 - Standardized success/error response shapes
@@ -124,13 +124,15 @@ These transform MemPalace from write-only to a fully maintainable memory system.
 - `mempalace_kg_stats` → knowledge graph health
 - `mempalace_graph_stats` → palace graph connectivity
 - `mempalace_diary_read` → per-agent AAAK journal
+- `mempalace_profile` / `mempalace_context` → derived KG profile + session start bundle
+- `mempalace_memory` / `mempalace_recall` → coarse save/forget and search+profile
 
 ## 🏗️ Architecture Overview
 
 ```
 src/
 ├── main.rs      – Binary entry point: loads ONNX model/tokenizer, dispatches MCP
-├── mcp.rs       – MCP tool handlers (44 tools, JSON-RPC over stdio)
+├── mcp.rs       – MCP tool handlers (49 tools, JSON-RPC over stdio)
 ├── db.rs        – Core SQLite operations: drawers, FTS5, vec0, KG, graph, bulk ops
 ├── embed.rs     – ONNX inference via tract, attention-mask mean pooling
 ├── import_sessions.rs – OpenCode session import logic
@@ -138,10 +140,14 @@ src/
 ├── indexer.rs     – File system indexer with whitelist/blacklist support
 ├── hallways.rs    – Structural entity co-occurrence graph (no NLP)
 ├── lock.rs        – Process writer flock
+├── profile.rs     – Derived profile + one-call context
+├── validate.rs    – Query/date/name sanitizers
+├── wal.rs         – JSONL write-ahead audit log
 └── knowledge_graph.rs – Triple store with temporal validity and supersede
 
 bench/
   longmemeval_rust_useronly.py – 500-question episodic memory benchmark (user turns)
+  locomo_rust.py               – LoCoMo retrieval harness (synthetic default; --data for official JSON)
   longmemeval_rust.py          – Same benchmark (all turns: user + assistant)
   embed_parity.py              – Verify embedding equivalence with ChromaDB
   compare.py                   – Diff two benchmark JSON outputs
