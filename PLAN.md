@@ -22,14 +22,14 @@ Progress log, and git status — not chat history.
 
 | Field | Value |
 |-------|-------|
-| Status | `done` |
-| Active phase | 25 |
-| Active task | *(done)* |
+| Status | `phase_complete` |
+| Active phase | 25 (code complete & committed through `e908c7c`) |
+| Active task | *(none)* |
 | Last completed task | 25.2 |
-| WIP notes | Phases 15–25 complete. |
+| WIP notes | Phases 15–25 implemented and on origin/master. vdsmini `~/bin/mempalace-mcp` is v3.1.0. WebDAV `/docs` mempalace + architecture + MCP-environment docs refreshed (49 tools). **Two benchmark gates are deferred, not satisfied:** (a) 15.8 follow-up — user-turns R@5 was never re-measured after the Phase 15 ranking changes; (b) Phase 25 close criteria — required one LongMemEval re-run to confirm annotation does not regress the floor. Both need the dataset. |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 255 passed; clippy clean; LoCoMo synthetic n=2 R@5=100% R@10=100% (2026-08-21) |
-| Blockers | none |
+| Last verification | `cargo test --release` 255 passed · `cargo fmt -- --check` clean · `cargo clippy --release -- -D warnings` clean · `python3 bench/locomo_rust.py` end-to-end ok, synthetic n=2 R@5=100% (2026-08-21 re-review) |
+| Blockers | LongMemEval dataset (`longmemeval_s_cleaned.json`) not present in this worktree → the two deferred R@5 gates above cannot run. Obtain dataset → run `python bench/longmemeval_rust_useronly.py` → require ≥ 94.04% → log scores → then Phase 25 may flip to `done`. |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
 
@@ -118,6 +118,11 @@ in-progress phase.
 | Indexer | CLI `index` only; extensions already include cs/php/swift/kt/java |
 | Durability | WAL journal, **no** `busy_timeout`, **no** process flock |
 | Docs drift | README still says “21 tools” / “107 tests” |
+
+*Snapshot taken **before** Phases 15–25. Values above are historical
+floors, not current state — current tool/test counts and scores live in
+the Resume table and Progress log. (Docs drift was resolved in Phase 21:
+README now says v3.1.0 / 49 tools.)*
 
 **Hard gates (never ship a phase that breaks these)**
 
@@ -968,59 +973,6 @@ R@5 ≥ 94.04% floor holds; log both scores.
 
 ---
 
-
-### 2026-08-21 — task 16.1–16.4 — KG supersede
-
-- tests added: half-open as_of, supersede close/open/errors/same-object, provenance, TOOLS_JSON
-- suite: `cargo test --release` → 174 passed
-- notes: `valid_until > as_of`; `BEGIN IMMEDIATE` supersede; ALTER triples source_file/source_drawer_id
-
-
-### 2026-08-21 — task 17.1–17.5 — write-path tools
-
-- tests added: checkpoint, delete_by_source, sync, mine, tunnel drawer IDs
-- suite: `cargo test --release` → 189 passed
-- notes: dry-run defaults; mine wraps indexer::index_directory_with
-
-
-### 2026-08-21 — task 18.1–18.4 — hallways
-
-- tests added: extract urls/paths/idents, hallway CRUD, auto-tunnels
-- suite: `cargo test --release` → 201 passed
-
-
-### 2026-08-21 — tasks 19–21 — authored_at, durability, 3.1.0
-
-- tests added: authored_at backfill/override/tie-break, list since/before, busy_timeout, busy retry, concurrent mixed ops, writer lock
-- suite: 211 passed; `cargo clippy --release -- -D warnings` clean; version 3.1.0
-- notes: flock on palace.write.lock; libc compile-time dep only
-
-### 2026-08-21 — phase 22 — expires_at + purge_expired
-
-- tests added: migration, add_drawer TTL, search/list/taxonomy hide expired, include_expired, purge dry-run/commit
-- suite: `cargo test --release` → 226 passed; clippy -D warnings clean
-- notes: half-open `expires_at <= now`; `add_drawer_ex`; MCP `mempalace_purge_expired` dry-run default true; `InvalidExpiresAt` at MCP boundary
-
-### 2026-08-21 — phase 23 — profile + context
-
-- tests added: static/dynamic profile, expired exclusion, context limits/empty/unknown agent, MCP schema+roundtrip
-- suite: `cargo test --release` → 238 passed; clippy -D warnings clean
-- notes: new `src/profile.rs`; tools `mempalace_profile`, `mempalace_context`
-
-### 2026-08-21 — phase 24 — memory / recall verb layer
-
-- tests added: save defaults/overrides/expires, forget, invalid action, recall+profile, empty palace, TOOLS_JSON teaching copy
-- suite: `cargo test --release` → 250 passed; clippy -D warnings clean
-- notes: `mempalace_memory` + `mempalace_recall`; granular tools unchanged
-
-### 2026-08-21 — phase 25 — LoCoMo harness + contradiction annotation
-
-- tests added: near-duplicate annotation, distinct/same-day/top10 bound, order preserved
-- suite: `cargo test --release` → 255 passed; clippy -D warnings clean
-- locomo: `python bench/locomo_rust.py` synthetic n=2 R@5=100% R@10=100% (official dataset not bundled)
-- lme: dataset not in tree; annotation does not reorder so 94.04% floor still the last measured user-turns score
-- notes: `MEMPALACE_CONTRADICTION_ANNOTATION=0` kill-switch; Jaccard≥0.9 and >24h apart; annotate older only
-
 ## Parking lot
 
 Not scheduled. Promote into a numbered phase only by editing this file
@@ -1103,3 +1055,71 @@ Format:
 - Added Phases 22–25 (expires_at, profile/context, verb-level tools,
   LoCoMo harness + contradiction annotation) and two parking-lot rows
   (chunking). No code changed; active work remains **15.1**.
+
+### 2026-08-21 — task 16.1–16.4 — KG supersede
+
+- tests added: half-open as_of, supersede close/open/errors/same-object, provenance, TOOLS_JSON
+- suite: `cargo test --release` → 174 passed
+- notes: `valid_until > as_of`; `BEGIN IMMEDIATE` supersede; ALTER triples source_file/source_drawer_id
+
+### 2026-08-21 — task 17.1–17.5 — write-path tools
+
+- tests added: checkpoint, delete_by_source, sync, mine, tunnel drawer IDs
+- suite: `cargo test --release` → 189 passed
+- notes: dry-run defaults; mine wraps indexer::index_directory_with
+
+### 2026-08-21 — task 18.1–18.4 — hallways
+
+- tests added: extract urls/paths/idents, hallway CRUD, auto-tunnels
+- suite: `cargo test --release` → 201 passed
+
+### 2026-08-21 — tasks 19–21 — authored_at, durability, 3.1.0
+
+- tests added: authored_at backfill/override/tie-break, list since/before, busy_timeout, busy retry, concurrent mixed ops, writer lock
+- suite: 211 passed; `cargo clippy --release -- -D warnings` clean; version 3.1.0
+- notes: flock on palace.write.lock; libc compile-time dep only
+
+### 2026-08-21 — phase 22 — expires_at + purge_expired
+
+- tests added: migration, add_drawer TTL, search/list/taxonomy hide expired, include_expired, purge dry-run/commit
+- suite: `cargo test --release` → 226 passed; clippy -D warnings clean
+- notes: half-open `expires_at <= now`; `add_drawer_ex`; MCP `mempalace_purge_expired` dry-run default true; `InvalidExpiresAt` at MCP boundary
+
+### 2026-08-21 — phase 23 — profile + context
+
+- tests added: static/dynamic profile, expired exclusion, context limits/empty/unknown agent, MCP schema+roundtrip
+- suite: `cargo test --release` → 238 passed; clippy -D warnings clean
+- notes: new `src/profile.rs`; tools `mempalace_profile`, `mempalace_context`
+
+### 2026-08-21 — phase 24 — memory / recall verb layer
+
+- tests added: save defaults/overrides/expires, forget, invalid action, recall+profile, empty palace, TOOLS_JSON teaching copy
+- suite: `cargo test --release` → 250 passed; clippy -D warnings clean
+- notes: `mempalace_memory` + `mempalace_recall`; granular tools unchanged
+
+### 2026-08-21 — phase 25 — LoCoMo harness + contradiction annotation
+
+- tests added: near-duplicate annotation, distinct/same-day/top10 bound, order preserved
+- suite: `cargo test --release` → 255 passed; clippy -D warnings clean
+- locomo: `python bench/locomo_rust.py` synthetic n=2 R@5=100% R@10=100% (official dataset not bundled)
+- lme: dataset not in tree; annotation does not reorder so 94.04% floor still the last measured user-turns score
+- notes: `MEMPALACE_CONTRADICTION_ANNOTATION=0` kill-switch; Jaccard≥0.9 and >24h apart; annotate older only
+
+### 2026-08-21 — re-review — full verification of Phases 15–25
+
+- Independent verification by second agent: `cargo test --release` → **255 passed**;
+  `cargo fmt -- --check` clean; `cargo clippy --release -- -D warnings` clean.
+- Spot-checked all named tests for 22.3/23.1/24.x and all five 25.2 tests — present and green.
+- TOOLS_JSON contains **49 tools** (37 baseline + 12 new); README updated to v3.1.0 / 49 tools / LoCoMo mention.
+- `python3 bench/locomo_rust.py` runs end-to-end against the release binary (synthetic n=2).
+- PLAN.md repaired: progress entries for 16–25 were orphaned between Phase 25 and the
+  Parking lot (outside the Progress log section); moved here in chronological order.
+- Status corrected from `done` to `phase_complete`: the Phase 25 close criteria
+  (one LongMemEval user-turns re-run, floor ≥ 94.04%) and the 15.8 follow-up
+  re-measurement remain outstanding pending dataset availability (see Blockers).
+
+### 2026-08-21 — deploy v3.1.0 + WebDAV docs
+
+- vdsmini: `unset CARGO_TARGET_DIR && make install` → `/Users/vds/bin/mempalace-mcp` prints `MemPalace v3.1.0 (Rust)` (Mach-O arm64).
+- orangepi (riscv64) and radxa (aarch64 Linux) reachable over SSH; no `mempalace-mcp` binary — leave on llmserverplus MCP proxy; do not scp the macOS Mach-O.
+- WebDAV `/docs/mempalace-mcp-deployment.md`, `/docs/architecture.md`, `/docs/ai-agent-mcp-environment.md` updated for 49 tools and phases 22–25.

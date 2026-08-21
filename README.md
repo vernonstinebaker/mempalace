@@ -207,13 +207,15 @@ By category (user-turns-only):
 # Build from source (requires Rust 1.75+)
 git clone https://github.com/vernonstinebaker/mempalace.git
 cd mempalace
-cargo build --release
+unset CARGO_TARGET_DIR   # IDEs/sandboxes may redirect cargo output
+make install             # cargo build --release && cp to ~/bin/mempalace-mcp
+mempalace-mcp --info     # expect: MemPalace v3.1.0 (Rust)
 
-# Install to PATH
-sudo cp target/release/mempalace-mcp /usr/local/bin/
-# or symlink
-ln -s $(pwd)/target/release/mempalace-mcp ~/bin/mempalace-mcp
+# Alternative: copy into a directory already on PATH
+# sudo cp target/release/mempalace-mcp /usr/local/bin/
 ```
+
+Prefer `make install` over a symlink: some clients hold `~/bin/mempalace-mcp` open, and a symlink to a stale `target/release` (or a Cursor `CARGO_TARGET_DIR` cache) will keep serving an old binary. Restart any MCP client after install so it execs the new file. Native target is `aarch64-macos` (vdsmini); do not copy this Mach-O to RISC-V or Android.
 
 ### First Run
 ```sh
@@ -279,9 +281,10 @@ DEALINGS IN THE SOFTWARE.
 ## 🧪 Testing
 
 ```sh
-cargo test --release   # unit + integration + graph + search + sync + hallways
-cargo fmt -- --check   # code style
-cargo clippy -- -D warnings  # lint
+cargo test --release          # 255 tests as of v3.1.0 / PLAN phases 15–25
+cargo fmt -- --check
+cargo clippy --release -- -D warnings
+python bench/locomo_rust.py   # synthetic LoCoMo harness (pass --data for official JSON)
 ```
 - Rust/sqlite-vec integration → [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec)
 - Pure-Rust ONNX → [github.com/pelotom/ tract](https://github.com/pelotom/tract)
