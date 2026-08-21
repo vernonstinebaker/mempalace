@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `done` |
-| Active phase | *(none — 15–26 complete)* |
+| Active phase | *(none — 15–27 complete)* |
 | Active task | *(done)* |
-| Last completed task | 26.6 |
-| WIP notes | Phase 26 (multi-source session import: OpenCode, Codex, Grok Build, Zcode) complete. Antigravity parked (server-side conversations). Next work requires a new phase decision. |
+| Last completed task | 27.1 |
+| WIP notes | Phase 27 (CLI `search` subcommand) complete. Bonus fix found via TDD: hyphenated/punctuated FTS tokens silently zeroed FTS-only results (`read-only` parsed as column subtraction) — now quoted by `sanitize_fts_query`. Next work requires a new phase decision. |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 276 passed · `cargo fmt -- --check` clean · `cargo clippy --release -- -D warnings` clean (2026-08-21) |
+| Last verification | `cargo test --release` 281 passed · fmt/clippy clean (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -1100,6 +1100,45 @@ changes → no benchmark re-run required.
 
 ---
 
+## Phase 27 — CLI search (debugging/verification tool)
+
+**Goal:** Let a human verify imports and reproduce retrieval from a
+terminal: `mempalace search <query>`. Thin wrapper over `Database::search`
+— same hybrid path as the MCP server, so no ranking changes and no
+benchmark re-run required.
+
+**Explicitly out of scope (stay MCP-only):** JSON output mode, `sort_by`,
+`offset` pagination, `max_distance`, `include_expired`, date filters.
+If any of those are ever wanted, that is a separate decision.
+
+**Files:** `src/main.rs` (subcommand + `#[cfg(test)]` tests).
+
+### 27.1 Search subcommand
+
+- [x] `test_format_search_results_prints_ranked_hits` — given a
+      `db.search`-shaped JSON value with two hits, output contains both,
+      in rank order, each line showing rank, wing/room, filed_at, and a
+      content snippet; similarity shown when present.
+- [x] `test_format_search_results_empty_shows_no_hits` — zero results →
+      friendly "No results" message, exit success.
+- [x] `test_cli_search_flag_parsing` — `--limit N` (default 5, clamped
+      1–100), `--wing W`, `--room R`, `--source FILE` extracted from
+      mixed flag/position order; missing query errors with usage text.
+- [x] `test_cli_search_wraps_db_search` — end-to-end against a temp
+      palace: insert two drawers via `add_drawer_ex`, run the same code
+      path as the subcommand, assert the better-matching drawer ranks
+      first and its snippet appears in output.
+
+Behavior: embedder loaded when available (vector+FTS hybrid); falls back
+to FTS-only exactly like the server when the model can't load. Output is
+human-readable plain text — one block per hit.
+
+**Phase 27 done when:** 27.1 `[x]`, suite green, fmt/clippy clean,
+README usage section updated. No benchmark re-run required (read-only
+wrapper, no ranking change).
+
+---
+
 ## Parking lot
 
 Not scheduled. Promote into a numbered phase only by editing this file
@@ -1271,3 +1310,11 @@ Format:
 - antigravity: parked — conversations are server-synced, no local transcript store (verified on disk)
 - no search-ranking changes → no benchmark re-run required
 - phase 26 complete; PLAN status → `done`
+
+### 2026-08-21 — phase 27 — CLI search + FTS hyphen fix
+
+- tests added: format ranked hits / empty message (2), flag parsing incl. clamp+errors (1), end-to-end wrap of db.search (1), sanitize hyphenated-token quoting (1)
+- suite: `cargo test --release` → 281 passed; fmt/clippy clean
+- bug fixed: `sanitize_fts_query` left punctuated tokens bare (`read-only` → FTS5 `read - only` → "no such column: only" swallowed to 0 results on the FTS-only path). Punctuated tokens are now quoted; vector path was unaffected, which is why the MCP server masked it.
+- tool: CLI `mempalace search <query> [--limit N] [--wing W] [--room R] [--source FILE]` — read-only wrapper over `db.search_filtered`, no ranking change → no benchmark re-run required
+- phase 27 complete; PLAN status → `done`

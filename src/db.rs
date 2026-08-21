@@ -2773,13 +2773,33 @@ fn sanitize_fts_query(query: &str) -> String {
     let mut parts: Vec<String> = phrases.iter().map(|p| format!("\"{p}\"")).collect();
     let tokens: Vec<&str> = stripped.split_whitespace().collect();
     if tokens.len() <= 1 && parts.is_empty() {
+        // Single bareword passes through — unless it contains punctuation
+        // that FTS5 would misparse (e.g. `read-only` → column `-only`).
+        if let Some(tok) = tokens.first() {
+            return quote_unsafe_fts_token(tok);
+        }
         return query.to_string();
     }
-    parts.extend(tokens.into_iter().map(|t| t.to_string()));
+    parts.extend(tokens.into_iter().map(quote_unsafe_fts_token));
     if parts.is_empty() {
         query.to_string()
     } else {
         parts.join(" OR ")
+    }
+}
+
+/// Quote an FTS5 token when it contains characters that are unsafe in a
+/// bareword (`-`, `.`, `:` …). A hyphenated bareword parses as subtraction
+/// and silently zeroes out results; quoting makes it a phrase, which the
+/// default tokenizer splits back into its component tokens.
+fn quote_unsafe_fts_token(tok: &str) -> String {
+    let safe = tok
+        .chars()
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '*');
+    if safe {
+        tok.to_string()
+    } else {
+        format!("\"{tok}\"")
     }
 }
 
@@ -3228,6 +3248,20 @@ mod tests {
     #[test]
     fn test_sanitize_fts_query_three_words() {
         assert_eq!(sanitize_fts_query("a b c"), "a OR b OR c".to_string());
+    }
+
+    #[test]
+    fn test_sanitize_fts_query_hyphenated_token_quoted() {
+        // A bareword with `-` parses as `read - only` ("no such column") and
+        // silently zeroes out the whole MATCH. Punctuated tokens must be quoted.
+        assert_eq!(
+            sanitize_fts_query("zcode read-only db"),
+            r#"zcode OR "read-only" OR db"#.to_string()
+        );
+        assert_eq!(
+            sanitize_fts_query("foo.rs bar"),
+            r#""foo.rs" OR bar"#.to_string()
+        );
     }
 
     #[test]

@@ -250,6 +250,10 @@ MEMPALACE_PALACE_PATH=~/mempalace mempalace-mcp
 # Import existing palace (original Python or Rust version)
 mempalace import-palace /path/to/old/palace.db
 
+# Search from the terminal (same hybrid retrieval as the MCP server)
+mempalace search "login bug" --wing codex --limit 10
+mempalace search "read-only databases" --room backend --source /tmp/notes.md
+
 # Import agent sessions (auto-discovers OpenCode/Codex/Grok/Zcode)
 mempalace index-sessions
 
