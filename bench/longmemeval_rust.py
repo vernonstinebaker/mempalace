@@ -134,9 +134,8 @@ class RustMCP:
             data = json.loads(text)
         except Exception:
             return []
-        if isinstance(data, list):
-            return [h.get("wing", "") for h in data]
-        return []
+        hits = data if isinstance(data, list) else data.get("results", [])
+        return [h.get("wing", "") for h in hits]
 
     def stop(self):
         try:

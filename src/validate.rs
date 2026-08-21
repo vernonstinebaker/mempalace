@@ -149,6 +149,75 @@ pub fn sanitize_content<'a>(val: &'a str) -> anyhow::Result<&'a str> {
     Ok(val)
 }
 
+/// Result of stripping system-prompt contamination from a search query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SanitizedQuery {
+    pub clean: String,
+    pub was_sanitized: bool,
+    pub original_length: usize,
+    pub clean_length: usize,
+}
+
+const SEARCH_QUERY_MAX_CHARS: usize = 250;
+
+const QUERY_BOILERPLATE_MARKERS: &[&str] = &[
+    "MemPalace Memory Protocol",
+    "AAAK is a compressed memory dialect",
+    "ON WAKE-UP:",
+    "BEFORE RESPONDING",
+    "AFTER EACH SESSION:",
+    "WHEN FACTS CHANGE:",
+    "This protocol ensures",
+    "Storage is not memory",
+    "Call mempalace_status",
+    "call mempalace_kg_query",
+    "call mempalace_diary_write",
+    "call mempalace_kg_invalidate",
+];
+
+fn is_boilerplate_line(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return true;
+    }
+    QUERY_BOILERPLATE_MARKERS.iter().any(|m| t.contains(m))
+}
+
+/// Strip system-prompt dumps from a search query and cap length at 250 chars.
+/// If stripping would leave nothing, the original query is kept (then clipped).
+pub fn sanitize_search_query(query: &str) -> SanitizedQuery {
+    let original_length = query.chars().count();
+    let has_boilerplate = QUERY_BOILERPLATE_MARKERS.iter().any(|m| query.contains(m));
+
+    let mut clean = if has_boilerplate {
+        let kept: Vec<&str> = query
+            .lines()
+            .map(str::trim)
+            .filter(|l| !is_boilerplate_line(l))
+            .collect();
+        if kept.is_empty() {
+            query.trim().to_string()
+        } else {
+            kept.join(" ")
+        }
+    } else {
+        query.trim().to_string()
+    };
+
+    if clean.chars().count() > SEARCH_QUERY_MAX_CHARS {
+        clean = clean.chars().take(SEARCH_QUERY_MAX_CHARS).collect();
+    }
+
+    let clean_length = clean.chars().count();
+    let was_sanitized = clean != query;
+    SanitizedQuery {
+        clean,
+        was_sanitized,
+        original_length,
+        clean_length,
+    }
+}
+
 // ── Tests ──────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -269,5 +338,39 @@ mod tests {
     fn test_accepts_100k_content() {
         let max = "x".repeat(100_000);
         assert!(sanitize_content(&max).is_ok());
+    }
+
+    #[test]
+    fn test_sanitize_query_strips_system_prompt_boilerplate() {
+        let q = "IMPORTANT — MemPalace Memory Protocol:\n1. ON WAKE-UP: Call mempalace_status to load palace overview + AAAK spec.\nThis protocol ensures the AI KNOWS before it speaks. Storage is not memory — but storage + this protocol = memory.\n\nwhy graphql";
+        let s = sanitize_search_query(q);
+        assert_eq!(s.clean, "why graphql");
+        assert!(s.was_sanitized);
+        assert!(s.original_length > s.clean_length);
+    }
+
+    #[test]
+    fn test_sanitize_query_passthrough_short() {
+        let s = sanitize_search_query("why graphql");
+        assert_eq!(s.clean, "why graphql");
+        assert!(!s.was_sanitized);
+    }
+
+    #[test]
+    fn test_sanitize_query_truncates_over_250() {
+        let q: String = "q".repeat(1000);
+        let s = sanitize_search_query(&q);
+        assert_eq!(s.clean.chars().count(), 250);
+        assert!(s.was_sanitized);
+        assert_eq!(s.original_length, 1000);
+        assert_eq!(s.clean_length, 250);
+    }
+
+    #[test]
+    fn test_sanitize_query_empty_after_strip_returns_original() {
+        let q = "IMPORTANT — MemPalace Memory Protocol:\n1. ON WAKE-UP: Call mempalace_status to load palace overview + AAAK spec.\nThis protocol ensures the AI KNOWS.\nStorage is not memory";
+        let s = sanitize_search_query(q);
+        assert!(!s.clean.is_empty());
+        assert!(s.clean.chars().count() <= 250);
     }
 }

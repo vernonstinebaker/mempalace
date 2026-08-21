@@ -188,12 +188,18 @@ This project follows **Test-Driven Development**:
 - Ask: would this break if deployed to a fresh VM with only Rust installed?
 - Remember: the goal is a reliable, embeddable memory system — not a feature-rich research prototype
 
-## 📋 ROADMAP.md Tracking
+## 📋 PLAN.md Tracking
 
-- The project roadmap lives at `ROADMAP.md` in the repo root.
-- Every time a phase or individual step is completed, update the corresponding
-  `- [ ]` checkbox to `- [x]` in ROADMAP.md.
-- When all steps in a phase are checked, update the Status Dashboard at the
-  top of ROADMAP.md to reflect the new grade for that dimension.
-- The roadmap is the single source of truth for project progress — keep it and
-  AGENTS.md in sync.
+- **Active work:** `PLAN.md` in the repo root. It has a **Resume here**
+  table, TDD protocol, and an append-only Progress log so a new session
+  can continue without chat history.
+- **Historical Phases 1–14:** `ROADMAP.md` (archive only — do not start
+  new tasks from it).
+- Every time a PLAN.md task is completed: mark its `- [ ]` as `- [x]`,
+  update **Resume here**, append the Progress log, keep `cargo test --release`
+  green.
+- When a whole PLAN.md phase is done, run that phase’s completion
+  checklist (in PLAN.md) before starting the next phase.
+- Do not implement the PLAN.md parking lot or “out of scope” Python
+  features (extra backends, LLM rerank, logstream, HTTP serve, etc.).
+- Keep PLAN.md, ROADMAP.md, and this file in sync if process rules change.

@@ -58,7 +58,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_traverse","description":"Walk the palace graph from a room. Shows connected ideas across wings \u2014 the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).","inputSchema":{"type":"object","properties":{"start_room":{"type":"string","description":"Room to start from (e.g. 'chromadb-setup', 'riley-school')"},"max_hops":{"type":"integer","description":"How many connections to follow (default: 2)"}},"required":["start_room"]}},"#,
     r#"{"name":"mempalace_find_tunnels","description":"Find rooms that bridge two wings \u2014 the hallways connecting different domains. E.g. what topics connect wing_code to wing_team?","inputSchema":{"type":"object","properties":{"wing_a":{"type":"string","description":"First wing (optional)"},"wing_b":{"type":"string","description":"Second wing (optional)"}}}},"#,
     r#"{"name":"mempalace_graph_stats","description":"Palace graph overview: total rooms, tunnel connections, edges between wings.","inputSchema":{"type":"object","properties":{}}},"#,
-    r#"{"name":"mempalace_search","description":"Semantic search with pagination. Returns results array, total count, limit, offset. Use sort_by=relevance (default), recency (newest first), or hybrid (relevance + recency boost).","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"filed_after":{"type":"string","description":"Only results filed after this ISO datetime (optional)"},"filed_before":{"type":"string","description":"Only results filed before this ISO datetime (optional)"},"sort_by":{"type":"string","description":"Sort mode: relevance, recency, or hybrid (default: relevance)"}},"required":["query"]}},"#,
+    r#"{"name":"mempalace_search","description":"Semantic search with pagination. Returns results array, total count, limit, offset. Use sort_by=relevance (default), recency (newest first), or hybrid (relevance + recency boost). Optional source_file filter and max_distance cutoff (0 disables).","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"filed_after":{"type":"string","description":"Only results filed after this ISO datetime (optional)"},"filed_before":{"type":"string","description":"Only results filed before this ISO datetime (optional)"},"source_file":{"type":"string","description":"Exact source_file metadata filter (optional)"},"max_distance":{"type":"number","description":"Max cosine distance for vector hits (default 1.5; 0 disables)"},"sort_by":{"type":"string","description":"Sort mode: relevance, recency, or hybrid (default: relevance)"}},"required":["query"]}},"#,
     r#"{"name":"mempalace_check_duplicate","description":"Check if content already exists in the palace before filing","inputSchema":{"type":"object","properties":{"content":{"type":"string","description":"Content to check"},"threshold":{"type":"number","description":"Similarity threshold 0-1 (default 0.9)"}},"required":["content"]}},"#,
     r#"{"name":"mempalace_add_drawer","description":"File verbatim content into the palace. Checks for duplicates first.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing (project name)"},"room":{"type":"string","description":"Room (aspect: backend, decisions, meetings...)"},"content":{"type":"string","description":"Verbatim content to store \u2014 exact words, never summarized"},"source_file":{"type":"string","description":"Where this came from (optional)"},"added_by":{"type":"string","description":"Who is filing this (default: mcp)"}},"required":["wing","room","content"]}},"#,
     r#"{"name":"mempalace_delete_drawer","description":"Delete a drawer by ID. Irreversible.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to delete"}},"required":["drawer_id"]}},"#,
@@ -365,16 +365,20 @@ impl<'a> Server<'a> {
 
             // ── mempalace_search ──────────────────────────────────────────────
             "mempalace_search" => {
-                let query = get_str(args, "query")
+                let query_raw = get_str(args, "query")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: query"))?;
+                let sanitized = validate::sanitize_search_query(query_raw);
+                let query = sanitized.clean.as_str();
                 let limit = get_i64(args, "limit").unwrap_or(5) as usize;
                 let offset = get_i64(args, "offset").unwrap_or(0) as usize;
                 let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
                 let room = validate::sanitize_name(get_str(args, "room"), "room")?;
                 let filed_after = validate::sanitize_iso_date(get_str(args, "filed_after"))?;
                 let filed_before = validate::sanitize_iso_date(get_str(args, "filed_before"))?;
+                let source_file = get_str(args, "source_file");
+                let max_distance = get_f64(args, "max_distance").unwrap_or(1.5);
                 let sort_by = get_str(args, "sort_by").unwrap_or("relevance");
-                let results = self.db.search(
+                let mut results = self.db.search_filtered(
                     query,
                     limit,
                     offset,
@@ -382,9 +386,24 @@ impl<'a> Server<'a> {
                     room,
                     filed_after,
                     filed_before,
+                    source_file,
+                    max_distance,
                     self.embedder.as_ref(),
                     sort_by,
                 )?;
+                if sanitized.was_sanitized {
+                    if let Some(obj) = results.as_object_mut() {
+                        obj.insert("query_sanitized".into(), json!(true));
+                        obj.insert(
+                            "sanitizer".into(),
+                            json!({
+                                "original_length": sanitized.original_length,
+                                "clean_length": sanitized.clean_length,
+                                "clean_query": sanitized.clean,
+                            }),
+                        );
+                    }
+                }
                 Ok(serde_json::to_string(&results)?)
             }
 
