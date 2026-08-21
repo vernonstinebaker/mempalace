@@ -512,8 +512,8 @@ impl Database {
         include_expired: bool,
     ) -> Result<Value> {
         let limit = limit.clamp(1, 1000);
-        if self.vector_disabled {
-            return self.fts_search(
+        let mut result = if self.vector_disabled {
+            self.fts_search(
                 query,
                 limit,
                 offset,
@@ -523,10 +523,9 @@ impl Database {
                 filed_before,
                 source_file,
                 include_expired,
-            );
-        }
-        if sort_by == "recency" {
-            return self.search_recent(
+            )?
+        } else if sort_by == "recency" {
+            self.search_recent(
                 query,
                 limit,
                 offset,
@@ -536,11 +535,9 @@ impl Database {
                 filed_before,
                 source_file,
                 include_expired,
-            );
-        }
-        let use_recency = sort_by == "hybrid";
-        if let Some(emb) = embedder {
-            return self.search_hybrid(
+            )?
+        } else if let Some(emb) = embedder {
+            self.search_hybrid(
                 query,
                 limit,
                 offset,
@@ -551,21 +548,24 @@ impl Database {
                 source_file,
                 max_distance,
                 emb,
-                use_recency,
+                sort_by == "hybrid",
                 include_expired,
-            );
-        }
-        self.fts_search(
-            query,
-            limit,
-            offset,
-            wing,
-            room,
-            filed_after,
-            filed_before,
-            source_file,
-            include_expired,
-        )
+            )?
+        } else {
+            self.fts_search(
+                query,
+                limit,
+                offset,
+                wing,
+                room,
+                filed_after,
+                filed_before,
+                source_file,
+                include_expired,
+            )?
+        };
+        self.maybe_annotate_contradictions(&mut result);
+        Ok(result)
     }
 
     // ── filter clause builder (shared by all search functions) ─────────────────
@@ -599,6 +599,22 @@ impl Database {
                 item["expired"] = json!(true);
             }
         }
+    }
+
+    fn contradiction_annotation_enabled() -> bool {
+        std::env::var("MEMPALACE_CONTRADICTION_ANNOTATION")
+            .map(|v| v != "0")
+            .unwrap_or(true)
+    }
+
+    fn maybe_annotate_contradictions(&self, value: &mut Value) {
+        if !Self::contradiction_annotation_enabled() {
+            return;
+        }
+        let Some(arr) = value.get_mut("results").and_then(|v| v.as_array_mut()) else {
+            return;
+        };
+        annotate_contradictions(arr);
     }
 
     /// Builds `AND d.wing = ?N AND d.room = ?M` clauses and collects param values.
@@ -2568,6 +2584,99 @@ fn parse_filed_at_age(filed_at: &str, now_secs: f64) -> Option<f64> {
     let epoch_secs = days * 86400.0 + hour as f64 * 3600.0 + min as f64 * 60.0 + sec as f64;
 
     Some((now_secs - epoch_secs).max(0.0))
+}
+
+fn filed_at_epoch(filed_at: &str) -> Option<f64> {
+    if filed_at.is_empty() {
+        return None;
+    }
+    let ts = filed_at.trim().replace('T', " ");
+    let ts = ts.trim_end_matches('Z');
+    let parts: Vec<&str> = ts.split(&[' ', '-', ':'][..]).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let year: i32 = parts[0].parse().ok()?;
+    let month: u32 = parts[1].parse().ok()?;
+    let day: u32 = parts[2].parse().ok()?;
+    let hour: u32 = parts.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let min: u32 = parts.get(4).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let sec: u32 = parts.get(5).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let days = (year - 1970) as f64 * 365.25 + (month - 1) as f64 * 30.44 + day as f64;
+    Some(days * 86400.0 + hour as f64 * 3600.0 + min as f64 * 60.0 + sec as f64)
+}
+
+fn token_jaccard(a: &str, b: &str) -> f64 {
+    let tok = |s: &str| {
+        s.to_lowercase()
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|t| t.len() > 1)
+            .map(|t| t.to_string())
+            .collect::<std::collections::HashSet<_>>()
+    };
+    let sa = tok(a);
+    let sb = tok(b);
+    if sa.is_empty() && sb.is_empty() {
+        return 1.0;
+    }
+    if sa.is_empty() || sb.is_empty() {
+        return 0.0;
+    }
+    let inter = sa.intersection(&sb).count() as f64;
+    let union = sa.union(&sb).count() as f64;
+    if union == 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
+
+fn annotate_contradictions(results: &mut [Value]) {
+    let n = results.len().min(10);
+    if n < 2 {
+        return;
+    }
+    const THRESHOLD: f64 = 0.9;
+    const DAY: f64 = 86400.0;
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let ci = results[i]
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let cj = results[j]
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if token_jaccard(ci, cj) < THRESHOLD {
+                continue;
+            }
+            let ei = results[i]
+                .get("filed_at")
+                .and_then(|v| v.as_str())
+                .and_then(filed_at_epoch);
+            let ej = results[j]
+                .get("filed_at")
+                .and_then(|v| v.as_str())
+                .and_then(filed_at_epoch);
+            let (Some(ei), Some(ej)) = (ei, ej) else {
+                continue;
+            };
+            if (ei - ej).abs() <= DAY {
+                continue;
+            }
+            let (older, newer) = if ei < ej { (i, j) } else { (j, i) };
+            let newer_id = results[newer]
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if newer_id.is_empty() {
+                continue;
+            }
+            results[older]["possibly_superseded_by"] = json!(newer_id);
+        }
+    }
 }
 
 // ── FTS5 query sanitization ───────────────────────────────────────────────────
@@ -5010,5 +5119,266 @@ mod tests {
         let result = db.purge_expired(false).unwrap();
         assert_eq!(result["success"], json!(true));
         assert_eq!(result["purged"].as_u64().unwrap(), 0);
+    }
+
+    fn set_filed(db: &Database, id: &str, ts: &str) {
+        db.conn
+            .execute(
+                "UPDATE drawers SET filed_at = ?1, authored_at = ?1 WHERE id = ?2",
+                params![ts, id],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn test_near_duplicate_hits_annotated() {
+        let (_dir, db) = test_db();
+        let older = db
+            .add_drawer(
+                "w",
+                "old",
+                "contradictiontoken the user prefers tea in the morning",
+                None,
+                "t",
+                None,
+            )
+            .unwrap();
+        let newer = db
+            .add_drawer(
+                "w",
+                "new",
+                "contradictiontoken the user prefers tea in the morning",
+                None,
+                "t",
+                None,
+            )
+            .unwrap();
+        set_filed(&db, &older, "2020-01-01 00:00:00");
+        set_filed(&db, &newer, "2025-01-01 00:00:00");
+        let results = db
+            .search(
+                "contradictiontoken prefers tea",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        let arr = results["results"].as_array().unwrap();
+        let old_hit = arr.iter().find(|r| r["id"] == older).unwrap();
+        assert_eq!(old_hit["possibly_superseded_by"], json!(newer));
+        let new_hit = arr.iter().find(|r| r["id"] == newer).unwrap();
+        assert!(new_hit.get("possibly_superseded_by").is_none());
+    }
+
+    #[test]
+    fn test_distinct_hits_not_annotated() {
+        let (_dir, db) = test_db();
+        db.add_drawer(
+            "w",
+            "a",
+            "distincttoken apples oranges banana smoothie",
+            None,
+            "t",
+            None,
+        )
+        .unwrap();
+        db.add_drawer(
+            "w",
+            "b",
+            "distincttoken quantum chromodynamics lattice gauge",
+            None,
+            "t",
+            None,
+        )
+        .unwrap();
+        let results = db
+            .search(
+                "distincttoken",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        for hit in results["results"].as_array().unwrap() {
+            assert!(
+                hit.get("possibly_superseded_by").is_none(),
+                "unexpected annotation {hit}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_same_day_duplicates_not_annotated() {
+        let (_dir, db) = test_db();
+        let a = db
+            .add_drawer(
+                "w",
+                "a",
+                "samedaytoken the user prefers tea in the morning",
+                None,
+                "t",
+                None,
+            )
+            .unwrap();
+        let b = db
+            .add_drawer(
+                "w",
+                "b",
+                "samedaytoken the user prefers tea in the morning",
+                None,
+                "t",
+                None,
+            )
+            .unwrap();
+        set_filed(&db, &a, "2026-01-01 10:00:00");
+        set_filed(&db, &b, "2026-01-01 18:00:00");
+        let results = db
+            .search(
+                "samedaytoken prefers tea",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        for hit in results["results"].as_array().unwrap() {
+            assert!(hit.get("possibly_superseded_by").is_none());
+        }
+    }
+
+    #[test]
+    fn test_annotation_bounded_to_top10() {
+        let (_dir, db) = test_db();
+        let mut ids = Vec::new();
+        for i in 0..15 {
+            let id = db
+                .add_drawer(
+                    "w",
+                    &format!("r{i:02}"),
+                    "boundtoken the user prefers tea in the morning",
+                    None,
+                    "t",
+                    None,
+                )
+                .unwrap();
+            set_filed(&db, &id, &format!("2020-01-{:02} 00:00:00", i + 1));
+            ids.push(id);
+        }
+        let results = db
+            .search(
+                "boundtoken prefers tea",
+                15,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        let arr = results["results"].as_array().unwrap();
+        assert!(arr.len() >= 11);
+        for hit in arr.iter().skip(10) {
+            assert!(
+                hit.get("possibly_superseded_by").is_none(),
+                "index 10+ annotated: {hit}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_annotation_does_not_change_order() {
+        let (_dir, db) = test_db();
+        let older = db
+            .add_drawer(
+                "w",
+                "old",
+                "ordertoken the user prefers tea in the morning",
+                None,
+                "t",
+                None,
+            )
+            .unwrap();
+        let newer = db
+            .add_drawer(
+                "w",
+                "new",
+                "ordertoken the user prefers tea in the morning",
+                None,
+                "t",
+                None,
+            )
+            .unwrap();
+        set_filed(&db, &older, "2020-01-01 00:00:00");
+        set_filed(&db, &newer, "2025-01-01 00:00:00");
+        let with_ann = db
+            .search(
+                "ordertoken prefers tea",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        let ids_on: Vec<String> = with_ann["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str().map(|s| s.to_string()))
+            .collect();
+        let ranks_on: Vec<Value> = with_ann["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.get("rank").cloned().unwrap_or(json!(null)))
+            .collect();
+        std::env::set_var("MEMPALACE_CONTRADICTION_ANNOTATION", "0");
+        let off = db
+            .search(
+                "ordertoken prefers tea",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        std::env::remove_var("MEMPALACE_CONTRADICTION_ANNOTATION");
+        let ids_off: Vec<String> = off["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str().map(|s| s.to_string()))
+            .collect();
+        let ranks_off: Vec<Value> = off["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r.get("rank").cloned().unwrap_or(json!(null)))
+            .collect();
+        assert_eq!(ids_on, ids_off);
+        assert_eq!(ranks_on, ranks_off);
     }
 }

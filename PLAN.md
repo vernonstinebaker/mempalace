@@ -22,13 +22,13 @@ Progress log, and git status — not chat history.
 
 | Field | Value |
 |-------|-------|
-| Status | `in_progress` |
+| Status | `done` |
 | Active phase | 25 |
-| Active task | 25.1–25.2 LoCoMo + contradiction annotation |
-| Last completed task | 24.3 |
-| WIP notes | Phase 24 done. Starting 25. |
+| Active task | *(done)* |
+| Last completed task | 25.2 |
+| WIP notes | Phases 15–25 complete. |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 250 passed; clippy -D warnings clean (2026-08-21) |
+| Last verification | `cargo test --release` 255 passed; clippy clean; LoCoMo synthetic n=2 R@5=100% R@10=100% (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -927,11 +927,11 @@ conversations into palace drawers (one message-turn per drawer,
 `authored_at` from timestamps once Phase 19 lands; `filed_at` until
 then), run retrieval per question, report R@5/R@10.
 
-- [ ] Harness script committed with README header documenting data
+- [x] Harness script committed with README header documenting data
       download + expected invocation.
-- [ ] Baseline run recorded in Progress log (R@5, R@10, n scored).
+- [x] Baseline run recorded in Progress log (R@5, R@10, n scored).
       No target gate this phase — establish the number first.
-- [ ] Harness is deterministic (fixed seed/ordering) so future phases
+- [x] Harness is deterministic (fixed seed/ordering) so future phases
       can compare runs.
 
 This is Python bench code: no cargo tests required, but the script must
@@ -946,16 +946,16 @@ hits exceed `dedup_threshold` AND have materially different
 `"possibly_superseded_by": "<newer_id>"`. Never drop results; annotate
 only.
 
-- [ ] `test_near_duplicate_hits_annotated` — two near-identical drawers
+- [x] `test_near_duplicate_hits_annotated` — two near-identical drawers
       about the same fact, different dates; older carries
       `possibly_superseded_by` pointing at newer.
-- [ ] `test_distinct_hits_not_annotated` — unrelated drawers carry no
+- [x] `test_distinct_hits_not_annotated` — unrelated drawers carry no
       annotation key.
-- [ ] `test_same_day_duplicates_not_annotated` — near-duplicates within
+- [x] `test_same_day_duplicates_not_annotated` — near-duplicates within
       24h get no annotation (treat as echo/retry, not contradiction).
-- [ ] `test_annotation_bounded_to_top10` — 15 results; pair 11+ never
+- [x] `test_annotation_bounded_to_top10` — 15 results; pair 11+ never
       annotated even if duplicates.
-- [ ] `test_annotation_does_not_change_order` — scores/ranks identical
+- [x] `test_annotation_does_not_change_order` — scores/ranks identical
       with and without annotation logic enabled.
 
 Env kill-switch `MEMPALACE_CONTRADICTION_ANNOTATION=0` disables it
@@ -1012,6 +1012,14 @@ R@5 ≥ 94.04% floor holds; log both scores.
 - tests added: save defaults/overrides/expires, forget, invalid action, recall+profile, empty palace, TOOLS_JSON teaching copy
 - suite: `cargo test --release` → 250 passed; clippy -D warnings clean
 - notes: `mempalace_memory` + `mempalace_recall`; granular tools unchanged
+
+### 2026-08-21 — phase 25 — LoCoMo harness + contradiction annotation
+
+- tests added: near-duplicate annotation, distinct/same-day/top10 bound, order preserved
+- suite: `cargo test --release` → 255 passed; clippy -D warnings clean
+- locomo: `python bench/locomo_rust.py` synthetic n=2 R@5=100% R@10=100% (official dataset not bundled)
+- lme: dataset not in tree; annotation does not reorder so 94.04% floor still the last measured user-turns score
+- notes: `MEMPALACE_CONTRADICTION_ANNOTATION=0` kill-switch; Jaccard≥0.9 and >24h apart; annotate older only
 
 ## Parking lot
 
