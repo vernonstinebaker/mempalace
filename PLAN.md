@@ -22,14 +22,14 @@ Progress log, and git status — not chat history.
 
 | Field | Value |
 |-------|-------|
-| Status | `phase_complete` |
-| Active phase | 25 (code complete & committed through `e908c7c`) |
-| Active task | *(none)* |
-| Last completed task | 25.2 |
-| WIP notes | Phases 15–25 implemented and on origin/master. vdsmini `~/bin/mempalace-mcp` is v3.1.0. WebDAV `/docs` mempalace + architecture + MCP-environment docs refreshed (49 tools). **Two benchmark gates are deferred, not satisfied:** (a) 15.8 follow-up — user-turns R@5 was never re-measured after the Phase 15 ranking changes; (b) Phase 25 close criteria — required one LongMemEval re-run to confirm annotation does not regress the floor. Both need the dataset. |
+| Status | `done` |
+| Active phase | 25 |
+| Active task | *(done)* |
+| Last completed task | 15.8 / 25 LME re-run |
+| WIP notes | Phases 15–25 complete. User-turns LME R@5 **96.81%** (455/470) on 2026-08-21; floor 94.04% and stretch 96.6% both held. Dataset stays out of git (`/tmp/longmemeval-data/longmemeval_s_cleaned.json`). |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 255 passed · `cargo fmt -- --check` clean · `cargo clippy --release -- -D warnings` clean · `python3 bench/locomo_rust.py` end-to-end ok, synthetic n=2 R@5=100% (2026-08-21 re-review) |
-| Blockers | LongMemEval dataset (`longmemeval_s_cleaned.json`) not present in this worktree → the two deferred R@5 gates above cannot run. Obtain dataset → run `python bench/longmemeval_rust_useronly.py` → require ≥ 94.04% → log scores → then Phase 25 may flip to `done`. |
+| Last verification | LME user-turns R@5 96.81% (455/470, 882s); `cargo test --release` 255 passed; clippy clean; LoCoMo synthetic n=2 R@5=100% |
+| Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
 
@@ -1123,3 +1123,13 @@ Format:
 - vdsmini: `unset CARGO_TARGET_DIR && make install` → `/Users/vds/bin/mempalace-mcp` prints `MemPalace v3.1.0 (Rust)` (Mach-O arm64).
 - orangepi (riscv64) and radxa (aarch64 Linux) reachable over SSH; no `mempalace-mcp` binary — leave on llmserverplus MCP proxy; do not scp the macOS Mach-O.
 - WebDAV `/docs/mempalace-mcp-deployment.md`, `/docs/architecture.md`, `/docs/ai-agent-mcp-environment.md` updated for 49 tools and phases 22–25.
+
+### 2026-08-21 — 15.8 + Phase 25 LME user-turns re-run
+
+- data: HuggingFace `xiaowu0162/longmemeval-cleaned` → `/tmp/longmemeval-data/longmemeval_s_cleaned.json` (500 items; not committed)
+- binary: `/Users/vds/bin/mempalace-mcp` v3.1.0; contradiction annotation **on** (default)
+- R@5: **96.81%** (455/470 scored, 500 total, 882.1s @ 0.5 q/s)
+- vs pre-Phase-15 floor 94.04% (442/470): +13 hits; stretch 96.6% met; no question-ID hacks
+- by type: knowledge-update 72/72 (1.000); multi-session 118/121 (0.975); single-session-assistant 53/56 (0.946); single-session-preference 27/30 (0.900); single-session-user 64/64 (1.000); temporal-reasoning 121/127 (0.953)
+- all-turns harness not re-run (not required for 15.8 / 25 close)
+- phase 25 complete; PLAN status → `done`

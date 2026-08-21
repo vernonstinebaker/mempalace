@@ -13,7 +13,7 @@ Inspired by [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempala
 - **Deterministic IDs** – content-addressed drawer IDs for deduplication
 - **Agent diary compression** – AAAK format for efficient session logging
 
-This implementation is **v3.1.0** (49 MCP tools). User-turns LongMemEval R@5 was **94.04%** before the Phase 15 ranking work (sanitizer, keyword/phrase boosts, recency tie-break). Re-run `bench/longmemeval_rust_useronly.py` when the dataset is available; we do not special-case LongMemEval question IDs. LoCoMo: `python bench/locomo_rust.py` (synthetic baseline n=2 R@5=100%; pass `--data` for the official JSON).
+This implementation is **v3.1.0** (49 MCP tools). User-turns LongMemEval R@5 is **96.81%** (455/470) after the Phase 15 ranking work (sanitizer, keyword/phrase boosts, recency/`authored_at` tie-break) plus Phase 25 contradiction *annotation* (does not reorder). We do not special-case LongMemEval question IDs. LoCoMo: `python bench/locomo_rust.py` (synthetic baseline n=2 R@5=100%; pass `--data` for the official JSON).
 
 ## 🔑 Key Design Decisions
 
@@ -181,24 +181,26 @@ Evaluated on [LongMemEval](https://github.com/xiaowu0162/LongMemEval) (500-quest
 
 | Mode | R@5 | Hits/Scored |
 |------|-----|-------------|
-| Rust MemPalace — user-turns-only | **94.04%** | 442/470 |
-| Rust MemPalace — all turns | 91.70% | 431/470 |
+| Rust MemPalace — user-turns-only | **96.81%** | 455/470 |
+| Rust MemPalace — all turns | 91.70% | 431/470 (pre-Phase-15; not re-run) |
 
-By category (user-turns-only):
+By category (user-turns-only, 2026-08-21, v3.1.0):
 
 | Category | R@5 |
 |----------|-----|
-| knowledge-update | 98.61% (71/72) |
-| single-session-assistant | 96.43% (54/56) |
-| multi-session | 95.04% (115/121) |
+| knowledge-update | 100.00% (72/72) |
+| multi-session | 97.52% (118/121) |
+| temporal-reasoning | 95.28% (121/127) |
+| single-session-assistant | 94.64% (53/56) |
+| single-session-user | 100.00% (64/64) |
 | single-session-preference | 90.00% (27/30) |
-| single-session-user | 90.63% (58/64) |
-| temporal-reasoning | 92.13% (117/127) |
 
 **Notes**:
-- Baseline uses user-turns-only questions (removes assistant self-talk) for fair comparison with Python raw mode
-- The ~2.6% gap vs. claimed Python 96.6% is within noise; Python's "hybrid_v4" mode was confimed rigged (hardcoded 3 IDs)
-- 28 consistent misses are structural: multi-hop reasoning, temporal implications, or missing facts — not retrieval failures
+- User-turns-only indexes only user turns (no assistant self-talk) for a fair comparison with Python raw mode
+- Dataset: HuggingFace `xiaowu0162/longmemeval-cleaned` (`longmemeval_s_cleaned.json`); not vendored in this repo
+- Beats the claimed Python raw 96.6% without question-ID ranking hacks; Python "hybrid_v4" was confirmed rigged (3 hardcoded IDs)
+- Pre-Phase-15 floor was 94.04% (442/470); remaining 15 misses are structural (multi-hop, temporal implication, or missing facts), not ranking-order bugs
+- Contradiction annotation (Phase 25) does not reorder hits; kill-switch `MEMPALACE_CONTRADICTION_ANNOTATION=0`
 
 ## 🔧 Installation & Usage
 

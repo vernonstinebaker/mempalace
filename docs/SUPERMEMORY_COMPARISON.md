@@ -30,7 +30,7 @@ Independent evaluations note their production engine scores lower than marketing
 |---|---|---|---|
 | Deployment | Single ~16MB binary, zero runtime deps, stdio MCP | Cloud API or local server binary (Node-based, needs model config wizard) | **MemPalace** |
 | Privacy / locality | Fully local, verbatim storage, no network | Local mode exists but pushes toward cloud; engine closed-source | **MemPalace** |
-| Retrieval | Hybrid vec0 + FTS5/BM25 → RRF; 94.04% LME user-turns R@5 | Proprietary hybrid; 95% R@15 claimed (different metric — not directly comparable) | Even (different metrics) |
+| Retrieval | Hybrid vec0 + FTS5/BM25 → RRF; **96.81%** LME user-turns R@5 (455/470, 2026-08-21) | Proprietary hybrid; 95% R@15 claimed (different metric — not directly comparable) | Even (different metrics) |
 | Temporal reasoning | KG triples with validity windows; `authored_at` planned (Phase 19); drawer-level time decay in `hybrid` sort | First-class: contradiction resolution + auto-forgetting built into the write path | **Supermemory** |
 | Fact lifecycle | Manual: agent must call `kg_invalidate` + `kg_add`; supersede planned (Phase 16) | Automatic extraction/update/expiry from raw conversation | **Supermemory** |
 | User profiles | None as a concept (wings/rooms are organizational, not semantic summaries) | Static+dynamic profiles, one-call retrieval | **Supermemory** |
@@ -84,7 +84,7 @@ Tool descriptions are prompt engineering — Supermemory proves agents reliably 
 ### B. Medium value
 
 #### B1. Broaden benchmarks beyond LongMemEval
-Adopt their MemoryBench idea (not their code): add LoCoMo and/or ConvoMed-style evals to `bench/`. Our current 94.04% R@5 is strong but single-benchmark; multi-benchmark coverage would be a genuine differentiator among local-first memory servers and guard against overfitting to LME question shapes.
+Adopt their MemoryBench idea (not their code): add LoCoMo and/or ConvoMed-style evals to `bench/`. User-turns LME R@5 is now **96.81%**; LoCoMo harness (`bench/locomo_rust.py`) is in-tree so we are no longer single-benchmark. Further official LoCoMo JSON runs remain optional.
 
 #### B2. Contradiction surfacing at search time
 When search returns multiple drawers that are near-duplicates semantically but differ in `filed_at`, annotate results (`superseded_candidate: true`) instead of silently ranking both. Cheap heuristic (existing dedup threshold machinery); helps agents resolve "which fact is current" without LLM rerank. Complements Phase 16 `kg_supersede`.
