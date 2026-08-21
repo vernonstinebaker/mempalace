@@ -158,14 +158,39 @@ fn active_extensions() -> Vec<String> {
 }
 
 pub fn index_directory(db: &Database, root: &str, embedder: Option<&Embedder>) -> Result<usize> {
+    index_directory_with(
+        db,
+        root,
+        embedder,
+        IndexOptions {
+            wing: None,
+            limit: 0,
+            dry_run: false,
+        },
+    )
+}
+
+pub struct IndexOptions<'a> {
+    pub wing: Option<&'a str>,
+    pub limit: usize,
+    pub dry_run: bool,
+}
+
+pub fn index_directory_with(
+    db: &Database,
+    root: &str,
+    embedder: Option<&Embedder>,
+    opts: IndexOptions<'_>,
+) -> Result<usize> {
     let root_path = Path::new(root).canonicalize()?;
-    // Wing is the last component of the root directory
-    let wing_name = root_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("files")
-        .to_lowercase()
-        .replace(' ', "_");
+    let wing_name = opts.wing.map(|s| s.to_string()).unwrap_or_else(|| {
+        root_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("files")
+            .to_lowercase()
+            .replace(' ', "_")
+    });
 
     let extensions = active_extensions();
 
@@ -255,6 +280,10 @@ pub fn index_directory(db: &Database, root: &str, embedder: Option<&Embedder>) -
             continue;
         }
 
+        if opts.limit > 0 && count >= opts.limit {
+            break;
+        }
+
         // Read file content (also catches files that look like text but are binary)
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
@@ -276,6 +305,11 @@ pub fn index_directory(db: &Database, root: &str, embedder: Option<&Embedder>) -
         let stored = format!("FILE: {}\n\n{}", path.display(), content_truncated);
 
         let source_file = path.to_str().unwrap_or("").to_string();
+
+        if opts.dry_run {
+            count += 1;
+            continue;
+        }
 
         match db.add_drawer(
             &wing_name,
@@ -384,5 +418,76 @@ mod tests {
         for f in SKIP_FILES {
             assert_eq!(f, &f.to_lowercase(), "SKIP_FILES must be lowercase");
         }
+    }
+
+    #[test]
+    fn test_mine_indexes_text_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(src.join("b.log"), "not indexed typically").unwrap();
+        let palace = tmp.path().join("palace");
+        let db = Database::open(palace.to_str().unwrap()).unwrap();
+        let n = index_directory(&db, src.to_str().unwrap(), None).unwrap();
+        assert!(n >= 1);
+        assert!(db.get_drawer_count() >= 1);
+    }
+
+    #[test]
+    fn test_mine_dry_run_writes_nothing() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.rs"), "fn a() {}").unwrap();
+        let palace = tmp.path().join("palace");
+        let db = Database::open(palace.to_str().unwrap()).unwrap();
+        let n = index_directory_with(
+            &db,
+            src.to_str().unwrap(),
+            None,
+            IndexOptions {
+                wing: None,
+                limit: 0,
+                dry_run: true,
+            },
+        )
+        .unwrap();
+        assert!(n >= 1);
+        assert_eq!(db.get_drawer_count(), 0);
+    }
+
+    #[test]
+    fn test_mine_limit_caps_files() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let src = tmp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("a.rs"), "fn a() {}").unwrap();
+        std::fs::write(src.join("b.rs"), "fn b() {}").unwrap();
+        std::fs::write(src.join("c.rs"), "fn c() {}").unwrap();
+        let palace = tmp.path().join("palace");
+        let db = Database::open(palace.to_str().unwrap()).unwrap();
+        let n = index_directory_with(
+            &db,
+            src.to_str().unwrap(),
+            None,
+            IndexOptions {
+                wing: None,
+                limit: 1,
+                dry_run: false,
+            },
+        )
+        .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(db.get_drawer_count(), 1);
+    }
+
+    #[test]
+    fn test_mine_missing_dir_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let palace = tmp.path().join("palace");
+        let db = Database::open(palace.to_str().unwrap()).unwrap();
+        let err = index_directory(&db, "/no/such/mempalace/src", None).unwrap_err();
+        assert!(!err.to_string().is_empty());
     }
 }

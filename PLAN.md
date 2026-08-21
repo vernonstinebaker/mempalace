@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `phase_complete` |
-| Active phase | 17 |
-| Active task | 17.1 |
-| Last completed task | 16.4 |
+| Active phase | 18 |
+| Active task | 18.1 |
+| Last completed task | 17.5 |
 | WIP notes | — |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 174 passed (2026-08-21) |
+| Last verification | `cargo test --release` 189 passed (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -401,10 +401,10 @@ MCP params: `items: [{wing, room, content}]`, optional `diary:
 
 Returns `{ added: [...], duplicates: [...], errors: [...], diary? }`.
 
-- [ ] `test_checkpoint_files_non_duplicates`
-- [ ] `test_checkpoint_skips_duplicates`
-- [ ] `test_checkpoint_writes_diary_after_items`
-- [ ] `test_checkpoint_partial_item_error_does_not_abort_others` —
+- [x] `test_checkpoint_files_non_duplicates`
+- [x] `test_checkpoint_skips_duplicates`
+- [x] `test_checkpoint_writes_diary_after_items`
+- [x] `test_checkpoint_partial_item_error_does_not_abort_others` —
       invalid wing on one item → that item in `errors`, others added.
       (If you choose all-or-nothing instead, document it in the test
       name and use a transaction — pick **partial** to match Python.)
@@ -417,10 +417,10 @@ Exact `source_file` match. **Dry-run default `true`.** Commit only when
 `dry_run=false`. Deletes drawers **and** their vec/FTS rows via existing
 `delete_drawer`. WAL on commit.
 
-- [ ] `test_delete_by_source_dry_run_does_not_delete` — returns
+- [x] `test_delete_by_source_dry_run_does_not_delete` — returns
       `match_count`, `sample` (up to 5 ids), `hint`
-- [ ] `test_delete_by_source_commit_removes_drawers_and_vectors`
-- [ ] `test_delete_by_source_no_match` — `match_count: 0`, success true
+- [x] `test_delete_by_source_commit_removes_drawers_and_vectors`
+- [x] `test_delete_by_source_no_match` — `match_count: 0`, success true
 
 ### 17.3 `mempalace_sync` (prune missing / gitignored sources)
 
@@ -438,9 +438,9 @@ Walk drawers with non-null `source_file`. Classify:
 Default dry-run (`apply=false`). `apply=true` deletes classified
 missing/gitignored. Optional `wing`, `project_dir`.
 
-- [ ] `test_sync_dry_run_missing`
-- [ ] `test_sync_apply_deletes_missing`
-- [ ] `test_sync_keeps_existing_file`
+- [x] `test_sync_dry_run_missing`
+- [x] `test_sync_apply_deletes_missing`
+- [x] `test_sync_keeps_existing_file`
 
 ### 17.4 `mempalace_mine` MCP (wrap `indexer::index_directory`)
 
@@ -450,10 +450,10 @@ Params: `source` (required dir), `wing?`, `limit?` (0 = all),
 Dry-run: count files that **would** be indexed without writing.
 Honor existing SKIP_DIRS / extensions / max size.
 
-- [ ] `test_mine_indexes_text_files` (temp dir with `a.rs`, `b.log`)
-- [ ] `test_mine_dry_run_writes_nothing`
-- [ ] `test_mine_limit_caps_files`
-- [ ] `test_mine_missing_dir_errors`
+- [x] `test_mine_indexes_text_files` (temp dir with `a.rs`, `b.log`)
+- [x] `test_mine_dry_run_writes_nothing`
+- [x] `test_mine_limit_caps_files`
+- [x] `test_mine_missing_dir_errors`
 
 CLI `index` stays. MCP is the new surface. Concurrent mine: if a
 process-level write lock exists (Phase 20), return
@@ -465,8 +465,8 @@ that two mines can race and depend on Phase 20.
 `create_tunnel` already has columns. Pass `source_drawer_id` /
 `target_drawer_id` through MCP and INSERT.
 
-- [ ] `test_create_tunnel_stores_drawer_ids`
-- [ ] `test_follow_tunnels_includes_label` (already true; add preview
+- [x] `test_create_tunnel_stores_drawer_ids`
+- [x] `test_follow_tunnels_includes_label` (already true; add preview
       of target drawers if IDs set — optional stretch, not required)
 
 **Phase 17 done when:** 17.1–17.5 `[x]`, suite green, TOOLS_JSON updated,
@@ -974,6 +974,13 @@ R@5 ≥ 94.04% floor holds; log both scores.
 - tests added: half-open as_of, supersede close/open/errors/same-object, provenance, TOOLS_JSON
 - suite: `cargo test --release` → 174 passed
 - notes: `valid_until > as_of`; `BEGIN IMMEDIATE` supersede; ALTER triples source_file/source_drawer_id
+
+
+### 2026-08-21 — task 17.1–17.5 — write-path tools
+
+- tests added: checkpoint, delete_by_source, sync, mine, tunnel drawer IDs
+- suite: `cargo test --release` → 189 passed
+- notes: dry-run defaults; mine wraps indexer::index_directory_with
 
 ## Parking lot
 

@@ -1426,6 +1426,141 @@ impl Database {
         Ok(())
     }
 
+    /// Batch-file drawers with semantic dedup. Partial: one bad item does not abort others.
+    pub fn checkpoint(
+        &self,
+        items: &[Value],
+        dedup_threshold: f64,
+        added_by: &str,
+        embedder: Option<&Embedder>,
+    ) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
+        let mut added = Vec::new();
+        let mut duplicates = Vec::new();
+        let mut errors = Vec::new();
+        for (i, item) in items.iter().enumerate() {
+            let wing = item.get("wing").and_then(|v| v.as_str()).unwrap_or("");
+            let room = item.get("room").and_then(|v| v.as_str()).unwrap_or("");
+            let content = item.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if wing.is_empty() || room.is_empty() || content.is_empty() {
+                errors.push(json!({
+                    "index": i,
+                    "error": "MissingRequiredArg: wing, room, and content are required",
+                }));
+                continue;
+            }
+            if let Err(e) = crate::validate::sanitize_name_required(wing, "wing") {
+                errors.push(json!({"index": i, "error": e.to_string()}));
+                continue;
+            }
+            if let Err(e) = crate::validate::sanitize_name_required(room, "room") {
+                errors.push(json!({"index": i, "error": e.to_string()}));
+                continue;
+            }
+            if let Err(e) = crate::validate::sanitize_content(content) {
+                errors.push(json!({"index": i, "error": e.to_string()}));
+                continue;
+            }
+            match self.check_duplicate(content, dedup_threshold, embedder) {
+                Ok(dup) if dup.get("is_duplicate") == Some(&json!(true)) => {
+                    duplicates.push(json!({
+                        "index": i,
+                        "wing": wing,
+                        "room": room,
+                        "match": dup.get("match"),
+                    }));
+                }
+                Ok(_) => match self.add_drawer(wing, room, content, None, added_by, embedder) {
+                    Ok(id) => added.push(json!({"index": i, "id": id, "wing": wing, "room": room})),
+                    Err(e) => errors.push(json!({"index": i, "error": e.to_string()})),
+                },
+                Err(e) => errors.push(json!({"index": i, "error": e.to_string()})),
+            }
+        }
+        (added, duplicates, errors)
+    }
+
+    pub fn delete_by_source(&self, source_file: &str, dry_run: bool) -> Result<Value> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id FROM drawers WHERE source_file = ?1")?;
+        let ids: Vec<String> = stmt
+            .query_map(params![source_file], |r| r.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let match_count = ids.len();
+        let sample: Vec<String> = ids.iter().take(5).cloned().collect();
+        if dry_run {
+            return Ok(json!({
+                "success": true,
+                "dry_run": true,
+                "match_count": match_count,
+                "sample": sample,
+                "hint": "Pass dry_run=false to delete these drawers.",
+            }));
+        }
+        for id in &ids {
+            self.delete_drawer(id)?;
+        }
+        Ok(json!({
+            "success": true,
+            "dry_run": false,
+            "deleted": match_count,
+            "ids": ids,
+        }))
+    }
+
+    pub fn sync_sources(
+        &self,
+        apply: bool,
+        wing: Option<&str>,
+        _project_dir: Option<&str>,
+    ) -> Result<Value> {
+        let sql = match wing {
+            Some(_) => {
+                "SELECT id, source_file FROM drawers WHERE source_file IS NOT NULL AND wing = ?1"
+            }
+            None => "SELECT id, source_file FROM drawers WHERE source_file IS NOT NULL",
+        };
+        let mut stmt = self.conn.prepare(sql)?;
+        let rows: Vec<(String, String)> = match wing {
+            Some(w) => stmt
+                .query_map(params![w], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect(),
+            None => stmt
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .filter_map(|r| r.ok())
+                .collect(),
+        };
+        let mut kept = Vec::new();
+        let mut missing = Vec::new();
+        for (id, path) in rows {
+            if Path::new(&path).exists() {
+                kept.push(json!({"id": id, "source_file": path}));
+            } else {
+                missing.push(json!({"id": id, "source_file": path}));
+            }
+        }
+        let mut deleted = 0usize;
+        if apply {
+            for item in &missing {
+                if let Some(id) = item.get("id").and_then(|v| v.as_str()) {
+                    self.delete_drawer(id)?;
+                    deleted += 1;
+                }
+            }
+        }
+        Ok(json!({
+            "success": true,
+            "apply": apply,
+            "kept": kept.len(),
+            "missing": missing.len(),
+            "gitignored": 0,
+            "deleted": deleted,
+            "missing_sample": missing.iter().take(5).cloned().collect::<Vec<_>>(),
+        }))
+    }
+
     // ── diary entries ─────────────────────────────────────────────────────────
 
     pub fn get_diary_entries(&self, wing: &str, limit: usize) -> Result<Value> {
@@ -2035,6 +2170,28 @@ impl Database {
         target_room: &str,
         label: &str,
     ) -> Result<String> {
+        self.create_tunnel_ex(
+            source_wing,
+            source_room,
+            target_wing,
+            target_room,
+            label,
+            None,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_tunnel_ex(
+        &self,
+        source_wing: &str,
+        source_room: &str,
+        target_wing: &str,
+        target_room: &str,
+        label: &str,
+        source_drawer_id: Option<&str>,
+        target_drawer_id: Option<&str>,
+    ) -> Result<String> {
         // Check existing
         let existing: Option<String> = self
             .conn
@@ -2053,15 +2210,17 @@ impl Database {
         );
         let id = format!("tunnel_{:x}", hash);
         self.conn.execute(
-            "INSERT INTO tunnels (id, source_wing, source_room, target_wing, target_room, label)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO tunnels (id, source_wing, source_room, target_wing, target_room, label, source_drawer_id, target_drawer_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 id,
                 source_wing,
                 source_room,
                 target_wing,
                 target_room,
-                label
+                label,
+                source_drawer_id,
+                target_drawer_id
             ],
         )?;
         Ok(id)
@@ -3950,5 +4109,131 @@ mod tests {
             .unwrap();
         let r2 = db.get_drawer("my-id").unwrap();
         assert_eq!(r2["content"], "updated!");
+    }
+
+    #[test]
+    fn test_checkpoint_files_non_duplicates() {
+        let (_dir, db) = test_db();
+        let items = vec![
+            json!({"wing": "w", "room": "r", "content": "first unique checkpoint"}),
+            json!({"wing": "w", "room": "r", "content": "second unique checkpoint"}),
+        ];
+        let (added, dups, errs) = db.checkpoint(&items, 0.9, "test", None);
+        assert_eq!(added.len(), 2);
+        assert!(dups.is_empty());
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn test_checkpoint_skips_duplicates() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "already filed unique body", None, "test", None)
+            .unwrap();
+        let items = vec![json!({"wing": "w", "room": "r", "content": "already filed unique body"})];
+        let (added, dups, errs) = db.checkpoint(&items, 0.9, "test", None);
+        assert!(added.is_empty());
+        assert_eq!(dups.len(), 1);
+        assert!(errs.is_empty());
+    }
+
+    #[test]
+    fn test_checkpoint_partial_item_error_does_not_abort_others() {
+        let (_dir, db) = test_db();
+        let items = vec![
+            json!({"wing": "ok", "room": "r", "content": "good item"}),
+            json!({"wing": "", "room": "r", "content": "bad item"}),
+        ];
+        let (added, _dups, errs) = db.checkpoint(&items, 0.9, "test", None);
+        assert_eq!(added.len(), 1);
+        assert_eq!(errs.len(), 1);
+    }
+
+    #[test]
+    fn test_delete_by_source_dry_run_does_not_delete() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "src content", Some("/tmp/x.rs"), "test", None)
+            .unwrap();
+        let result = db.delete_by_source("/tmp/x.rs", true).unwrap();
+        assert_eq!(result["dry_run"], true);
+        assert_eq!(result["match_count"], 1);
+        assert_eq!(db.get_drawer_count(), 1);
+    }
+
+    #[test]
+    fn test_delete_by_source_commit_removes_drawers_and_vectors() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "src content two", Some("/tmp/y.rs"), "test", None)
+            .unwrap();
+        let result = db.delete_by_source("/tmp/y.rs", false).unwrap();
+        assert_eq!(result["deleted"], 1);
+        assert_eq!(db.get_drawer_count(), 0);
+    }
+
+    #[test]
+    fn test_delete_by_source_no_match() {
+        let (_dir, db) = test_db();
+        let result = db.delete_by_source("/no/such.rs", false).unwrap();
+        assert_eq!(result["deleted"], 0);
+        assert_eq!(result["success"], true);
+    }
+
+    #[test]
+    fn test_sync_dry_run_missing() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "gone", Some("/no/such/file.rs"), "test", None)
+            .unwrap();
+        let result = db.sync_sources(false, None, None).unwrap();
+        assert_eq!(result["missing"], 1);
+        assert_eq!(result["deleted"], 0);
+        assert_eq!(db.get_drawer_count(), 1);
+    }
+
+    #[test]
+    fn test_sync_apply_deletes_missing() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "gone2", Some("/no/such/file2.rs"), "test", None)
+            .unwrap();
+        let result = db.sync_sources(true, None, None).unwrap();
+        assert_eq!(result["deleted"], 1);
+        assert_eq!(db.get_drawer_count(), 0);
+    }
+
+    #[test]
+    fn test_sync_keeps_existing_file() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("keep.rs");
+        std::fs::write(&path, "fn main() {}").unwrap();
+        let db = Database::open(dir.path().join("palace").to_str().unwrap()).unwrap();
+        db.add_drawer(
+            "w",
+            "r",
+            "keep me",
+            Some(path.to_str().unwrap()),
+            "test",
+            None,
+        )
+        .unwrap();
+        let result = db.sync_sources(true, None, None).unwrap();
+        assert_eq!(result["kept"], 1);
+        assert_eq!(result["deleted"], 0);
+        assert_eq!(db.get_drawer_count(), 1);
+    }
+
+    #[test]
+    fn test_create_tunnel_stores_drawer_ids() {
+        let (_dir, db) = test_db();
+        let id = db
+            .create_tunnel_ex("wa", "ra", "wb", "rb", "lab", Some("d1"), Some("d2"))
+            .unwrap();
+        let (s, t): (String, String) = db
+            .conn
+            .query_row(
+                "SELECT source_drawer_id, target_drawer_id FROM tunnels WHERE id=?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(s, "d1");
+        assert_eq!(t, "d2");
     }
 }

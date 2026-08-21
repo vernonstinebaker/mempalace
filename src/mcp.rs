@@ -5,6 +5,7 @@ use serde_json::{json, Value};
 use crate::db::Database;
 use crate::embed::Embedder;
 use crate::import_sessions;
+use crate::indexer;
 use crate::knowledge_graph::KnowledgeGraph;
 use crate::validate;
 use crate::wal;
@@ -65,6 +66,10 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_delete_drawer","description":"Delete a drawer by ID. Irreversible.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to delete"}},"required":["drawer_id"]}},"#,
     r#"{"name":"mempalace_update_drawer","description":"Update the content (and optionally wing/room) of an existing drawer by ID. Re-embeds and re-indexes automatically. Use this to correct facts, update paths, or revise stored text without deleting and re-adding.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to update"},"content":{"type":"string","description":"New content to store"},"wing":{"type":"string","description":"New wing (optional — keeps existing if omitted)"},"room":{"type":"string","description":"New room (optional — keeps existing if omitted)"}},"required":["drawer_id","content"]}},"#,
     r#"{"name":"mempalace_bulk_replace","description":"Find-and-replace a string across ALL drawer content in the palace. Returns count of updated drawers. Useful for bulk corrections like renamed paths, people, or projects.","inputSchema":{"type":"object","properties":{"find":{"type":"string","description":"Exact string to find"},"replace":{"type":"string","description":"String to replace it with"},"wing":{"type":"string","description":"Limit to this wing only (optional)"}},"required":["find","replace"]}},"#,
+    r#"{"name":"mempalace_checkpoint","description":"Batch-file drawers with semantic dedup, then optionally write a diary entry. Partial: one bad item does not abort others.","inputSchema":{"type":"object","properties":{"items":{"type":"array","description":"Array of {wing, room, content} objects"},"diary":{"type":"object","description":"Optional {agent_name, entry, topic}"},"dedup_threshold":{"type":"number","description":"Similarity threshold (default 0.9)"},"added_by":{"type":"string"}},"required":["items"]}},"#,
+    r#"{"name":"mempalace_delete_by_source","description":"Delete drawers whose source_file exactly matches. Dry-run by default.","inputSchema":{"type":"object","properties":{"source_file":{"type":"string"},"dry_run":{"type":"boolean","description":"Default true \u2014 preview only"}},"required":["source_file"]}},"#,
+    r#"{"name":"mempalace_sync","description":"Prune drawers whose source_file no longer exists. Dry-run unless apply=true.","inputSchema":{"type":"object","properties":{"apply":{"type":"boolean","description":"Delete missing sources (default false)"},"wing":{"type":"string"},"project_dir":{"type":"string"}}}},"#,
+    r#"{"name":"mempalace_mine","description":"Index a directory of text files into the palace. dry_run counts without writing.","inputSchema":{"type":"object","properties":{"source":{"type":"string","description":"Directory to index"},"wing":{"type":"string"},"limit":{"type":"integer","description":"Max files (0 = all)"},"dry_run":{"type":"boolean"}},"required":["source"]}},"#,
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}},"#,
     r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable. Defaults to incremental (only new sessions). Use full=true to re-import all.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
@@ -76,7 +81,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_repair","description":"Reindex all drawers (backfill missing embeddings). Use when vector health shows divergence or after importing many sessions.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_reconnect","description":"Rebuild FTS index and re-probe vector health. Use after external writes or when search returns unexpected results.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_wal_log","description":"Read write-ahead log entries (audit trail). Returns last N entries newest-first.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max entries to return (default 20)"}}}},"#,
-    r#"{"name":"mempalace_create_tunnel","description":"Create an explicit cross-wing tunnel linking ideas in different wings.","inputSchema":{"type":"object","properties":{"source_wing":{"type":"string","description":"Source wing"},"source_room":{"type":"string","description":"Source room"},"target_wing":{"type":"string","description":"Target wing"},"target_room":{"type":"string","description":"Target room"},"label":{"type":"string","description":"Optional label for this tunnel"}},"required":["source_wing","source_room","target_wing","target_room"]}},"#,
+    r#"{"name":"mempalace_create_tunnel","description":"Create an explicit cross-wing tunnel linking ideas in different wings.","inputSchema":{"type":"object","properties":{"source_wing":{"type":"string","description":"Source wing"},"source_room":{"type":"string","description":"Source room"},"target_wing":{"type":"string","description":"Target wing"},"target_room":{"type":"string","description":"Target room"},"label":{"type":"string","description":"Optional label for this tunnel"},"source_drawer_id":{"type":"string"},"target_drawer_id":{"type":"string"}},"required":["source_wing","source_room","target_wing","target_room"]}},"#,
     r#"{"name":"mempalace_list_tunnels","description":"List explicit cross-wing tunnels, optionally filtered by wing.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"}}}},"#,
     r#"{"name":"mempalace_delete_tunnel","description":"Delete an explicit cross-wing tunnel by ID.","inputSchema":{"type":"object","properties":{"tunnel_id":{"type":"string","description":"Tunnel ID to delete"}},"required":["tunnel_id"]}},"#,
     r#"{"name":"mempalace_follow_tunnels","description":"Follow explicit tunnels from a wing/room to see connected ideas in other wings.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing name"},"room":{"type":"string","description":"Room name"}},"required":["wing","room"]}},"#,
@@ -774,12 +779,16 @@ impl<'a> Server<'a> {
                     "target_room",
                 )?;
                 let label = get_str(args, "label").unwrap_or("");
-                let id = self.db.create_tunnel(
+                let source_drawer_id = get_str(args, "source_drawer_id");
+                let target_drawer_id = get_str(args, "target_drawer_id");
+                let id = self.db.create_tunnel_ex(
                     source_wing,
                     source_room,
                     target_wing,
                     target_room,
                     label,
+                    source_drawer_id,
+                    target_drawer_id,
                 )?;
                 Ok(serde_json::to_string(&json!({
                     "success": true, "tunnel_id": id,
@@ -844,6 +853,117 @@ impl<'a> Server<'a> {
                 Ok(serde_json::to_string(&result)?)
             }
 
+            // ── mempalace_checkpoint ───────────────────────────────────────────
+            "mempalace_checkpoint" => {
+                let items = args
+                    .get("items")
+                    .and_then(|v| v.as_array())
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: items"))?;
+                let threshold = get_f64(args, "dedup_threshold").unwrap_or(0.9);
+                let added_by = get_str(args, "added_by").unwrap_or("mcp");
+                let (added, duplicates, errors) =
+                    self.db
+                        .checkpoint(items, threshold, added_by, self.embedder.as_ref());
+                let mut diary_result = Value::Null;
+                if let Some(diary) = args.get("diary") {
+                    let agent_name = diary
+                        .get("agent_name")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: diary.agent_name"))?;
+                    let entry = diary
+                        .get("entry")
+                        .and_then(|v| v.as_str())
+                        .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: diary.entry"))?;
+                    let topic = diary
+                        .get("topic")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("general");
+                    let normalized = normalize_agent_name(agent_name);
+                    let wing = format!("wing_{normalized}");
+                    let full_content = format!("[{topic}] {entry}");
+                    let entry_id = self.db.add_drawer(
+                        &wing,
+                        "diary",
+                        &full_content,
+                        None,
+                        agent_name,
+                        self.embedder.as_ref(),
+                    )?;
+                    diary_result =
+                        json!({"entry_id": entry_id, "agent": agent_name, "topic": topic});
+                }
+                wal::log_write(
+                    "checkpoint",
+                    json!({
+                        "added": added.len(),
+                        "duplicates": duplicates.len(),
+                        "errors": errors.len(),
+                    }),
+                );
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "added": added,
+                    "duplicates": duplicates,
+                    "errors": errors,
+                    "diary": diary_result,
+                }))?)
+            }
+
+            // ── mempalace_delete_by_source ─────────────────────────────────────
+            "mempalace_delete_by_source" => {
+                let source_file = get_str(args, "source_file")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: source_file"))?;
+                let dry_run = get_bool(args, "dry_run").unwrap_or(true);
+                let result = self.db.delete_by_source(source_file, dry_run)?;
+                if !dry_run {
+                    wal::log_write(
+                        "delete_by_source",
+                        json!({"source_file": source_file, "deleted": result.get("deleted")}),
+                    );
+                }
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_sync ─────────────────────────────────────────────────
+            "mempalace_sync" => {
+                let apply = get_bool(args, "apply").unwrap_or(false);
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let project_dir = get_str(args, "project_dir");
+                let result = self.db.sync_sources(apply, wing, project_dir)?;
+                if apply {
+                    wal::log_write(
+                        "sync",
+                        json!({"apply": true, "deleted": result.get("deleted")}),
+                    );
+                }
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            // ── mempalace_mine ─────────────────────────────────────────────────
+            "mempalace_mine" => {
+                let source = get_str(args, "source")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: source"))?;
+                let wing = get_str(args, "wing");
+                let limit = get_i64(args, "limit").unwrap_or(0) as usize;
+                let dry_run = get_bool(args, "dry_run").unwrap_or(false);
+                let imported = indexer::index_directory_with(
+                    self.db,
+                    source,
+                    self.embedder.as_ref(),
+                    indexer::IndexOptions {
+                        wing,
+                        limit,
+                        dry_run,
+                    },
+                )?;
+                wal::log_write("mine", json!({"imported": imported, "dry_run": dry_run}));
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "imported": imported,
+                    "dry_run": dry_run,
+                }))?)
+            }
+
             _ => Err(anyhow::anyhow!("UnknownTool: {name}")),
         }
     }
@@ -860,6 +980,10 @@ fn get_i64(args: &Value, key: &str) -> Option<i64> {
         Value::Number(n) => n.as_i64(),
         _ => None,
     })
+}
+
+fn get_bool(args: &Value, key: &str) -> Option<bool> {
+    args.get(key).and_then(|v| v.as_bool())
 }
 
 fn get_f64(args: &Value, key: &str) -> Option<f64> {
@@ -900,5 +1024,14 @@ mod tests {
         assert!(TOOLS_JSON.contains("mempalace_kg_supersede"));
         assert!(TOOLS_JSON.contains("old_object"));
         assert!(TOOLS_JSON.contains("new_object"));
+    }
+
+    #[test]
+    fn test_tools_json_contains_write_path_tools() {
+        assert!(TOOLS_JSON.contains("mempalace_checkpoint"));
+        assert!(TOOLS_JSON.contains("mempalace_delete_by_source"));
+        assert!(TOOLS_JSON.contains("mempalace_sync"));
+        assert!(TOOLS_JSON.contains("mempalace_mine"));
+        assert!(TOOLS_JSON.contains("source_drawer_id"));
     }
 }
