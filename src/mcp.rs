@@ -61,9 +61,9 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_traverse","description":"Walk the palace graph from a room. Shows connected ideas across wings \u2014 the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).","inputSchema":{"type":"object","properties":{"start_room":{"type":"string","description":"Room to start from (e.g. 'chromadb-setup', 'riley-school')"},"max_hops":{"type":"integer","description":"How many connections to follow (default: 2)"}},"required":["start_room"]}},"#,
     r#"{"name":"mempalace_find_tunnels","description":"Find rooms that bridge two wings \u2014 the hallways connecting different domains. E.g. what topics connect wing_code to wing_team?","inputSchema":{"type":"object","properties":{"wing_a":{"type":"string","description":"First wing (optional)"},"wing_b":{"type":"string","description":"Second wing (optional)"}}}},"#,
     r#"{"name":"mempalace_graph_stats","description":"Palace graph overview: total rooms, tunnel connections, edges between wings.","inputSchema":{"type":"object","properties":{}}},"#,
-    r#"{"name":"mempalace_search","description":"Semantic search with pagination. Returns results array, total count, limit, offset. Use sort_by=relevance (default), recency (newest first), or hybrid (relevance + recency boost). Optional source_file filter and max_distance cutoff (0 disables).","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"filed_after":{"type":"string","description":"Only results filed after this ISO datetime (optional)"},"filed_before":{"type":"string","description":"Only results filed before this ISO datetime (optional)"},"source_file":{"type":"string","description":"Exact source_file metadata filter (optional)"},"max_distance":{"type":"number","description":"Max cosine distance for vector hits (default 1.5; 0 disables)"},"sort_by":{"type":"string","description":"Sort mode: relevance, recency, or hybrid (default: relevance)"}},"required":["query"]}},"#,
+    r#"{"name":"mempalace_search","description":"Semantic search with pagination. Returns results array, total count, limit, offset. Use sort_by=relevance (default), recency (newest first), or hybrid (relevance + recency boost). Optional source_file filter and max_distance cutoff (0 disables). Expired drawers are hidden unless include_expired=true.","inputSchema":{"type":"object","properties":{"query":{"type":"string","description":"What to search for"},"limit":{"type":"integer","description":"Max results (default 5)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"filed_after":{"type":"string","description":"Only results filed after this ISO datetime (optional)"},"filed_before":{"type":"string","description":"Only results filed before this ISO datetime (optional)"},"source_file":{"type":"string","description":"Exact source_file metadata filter (optional)"},"max_distance":{"type":"number","description":"Max cosine distance for vector hits (default 1.5; 0 disables)"},"sort_by":{"type":"string","description":"Sort mode: relevance, recency, or hybrid (default: relevance)"},"include_expired":{"type":"boolean","description":"Include expired drawers (default false)"}},"required":["query"]}},"#,
     r#"{"name":"mempalace_check_duplicate","description":"Check if content already exists in the palace before filing","inputSchema":{"type":"object","properties":{"content":{"type":"string","description":"Content to check"},"threshold":{"type":"number","description":"Similarity threshold 0-1 (default 0.9)"}},"required":["content"]}},"#,
-    r#"{"name":"mempalace_add_drawer","description":"File verbatim content into the palace. Checks for duplicates first.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing (project name)"},"room":{"type":"string","description":"Room (aspect: backend, decisions, meetings...)"},"content":{"type":"string","description":"Verbatim content to store \u2014 exact words, never summarized"},"source_file":{"type":"string","description":"Where this came from (optional)"},"added_by":{"type":"string","description":"Who is filing this (default: mcp)"}},"required":["wing","room","content"]}},"#,
+    r#"{"name":"mempalace_add_drawer","description":"File verbatim content into the palace. Checks for duplicates first.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing (project name)"},"room":{"type":"string","description":"Room (aspect: backend, decisions, meetings...)"},"content":{"type":"string","description":"Verbatim content to store \u2014 exact words, never summarized"},"source_file":{"type":"string","description":"Where this came from (optional)"},"added_by":{"type":"string","description":"Who is filing this (default: mcp)"},"expires_at":{"type":"string","description":"Optional ISO datetime after which the drawer is hidden from reads"}},"required":["wing","room","content"]}},"#,
     r#"{"name":"mempalace_delete_drawer","description":"Delete a drawer by ID. Irreversible.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to delete"}},"required":["drawer_id"]}},"#,
     r#"{"name":"mempalace_update_drawer","description":"Update the content (and optionally wing/room) of an existing drawer by ID. Re-embeds and re-indexes automatically. Use this to correct facts, update paths, or revise stored text without deleting and re-adding.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to update"},"content":{"type":"string","description":"New content to store"},"wing":{"type":"string","description":"New wing (optional — keeps existing if omitted)"},"room":{"type":"string","description":"New room (optional — keeps existing if omitted)"}},"required":["drawer_id","content"]}},"#,
     r#"{"name":"mempalace_bulk_replace","description":"Find-and-replace a string across ALL drawer content in the palace. Returns count of updated drawers. Useful for bulk corrections like renamed paths, people, or projects.","inputSchema":{"type":"object","properties":{"find":{"type":"string","description":"Exact string to find"},"replace":{"type":"string","description":"String to replace it with"},"wing":{"type":"string","description":"Limit to this wing only (optional)"}},"required":["find","replace"]}},"#,
@@ -71,6 +71,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_delete_by_source","description":"Delete drawers whose source_file exactly matches. Dry-run by default.","inputSchema":{"type":"object","properties":{"source_file":{"type":"string"},"dry_run":{"type":"boolean","description":"Default true \u2014 preview only"}},"required":["source_file"]}},"#,
     r#"{"name":"mempalace_sync","description":"Prune drawers whose source_file no longer exists. Dry-run unless apply=true.","inputSchema":{"type":"object","properties":{"apply":{"type":"boolean","description":"Delete missing sources (default false)"},"wing":{"type":"string"},"project_dir":{"type":"string"}}}},"#,
     r#"{"name":"mempalace_mine","description":"Index a directory of text files into the palace. dry_run counts without writing.","inputSchema":{"type":"object","properties":{"source":{"type":"string","description":"Directory to index"},"wing":{"type":"string"},"limit":{"type":"integer","description":"Max files (0 = all)"},"dry_run":{"type":"boolean"}},"required":["source"]}},"#,
+    r#"{"name":"mempalace_purge_expired","description":"Hard-delete drawers whose expires_at has passed. Dry-run by default.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"Default true \u2014 preview only"}}}},"#,
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}},"#,
     r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable. Defaults to incremental (only new sessions). Use full=true to re-import all.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
@@ -87,7 +88,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_delete_tunnel","description":"Delete an explicit cross-wing tunnel by ID.","inputSchema":{"type":"object","properties":{"tunnel_id":{"type":"string","description":"Tunnel ID to delete"}},"required":["tunnel_id"]}},"#,
     r#"{"name":"mempalace_follow_tunnels","description":"Follow explicit tunnels from a wing/room to see connected ideas in other wings.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing name"},"room":{"type":"string","description":"Room name"}},"required":["wing","room"]}},"#,
     r#"{"name":"mempalace_get_drawer","description":"Fetch a single drawer by ID with full content and metadata.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to fetch"}},"required":["drawer_id"]}},"#,
-    r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"since":{"type":"string","description":"Only drawers filed at or after this ISO datetime"},"before":{"type":"string","description":"Only drawers filed before this ISO datetime"}}}},"#,
+    r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"since":{"type":"string","description":"Only drawers filed at or after this ISO datetime"},"before":{"type":"string","description":"Only drawers filed before this ISO datetime"},"include_expired":{"type":"boolean","description":"Include expired drawers (default false)"}}}},"#,
     r#"{"name":"mempalace_integrity","description":"Run integrity checks across all indices (FTS, vectors, triples, tunnels). Returns health report with any issues found.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_list_hallways","description":"List structural hallways (entity co-occurrence graph) optionally filtered by wing.","inputSchema":{"type":"object","properties":{"wing":{"type":"string"}}}},"#,
     r#"{"name":"mempalace_delete_hallway","description":"Delete a hallway by ID.","inputSchema":{"type":"object","properties":{"hallway_id":{"type":"string"}},"required":["hallway_id"]}}"#,
@@ -207,7 +208,7 @@ impl<'a> Server<'a> {
         match name {
             // ── mempalace_status ─────────────────────────────────────────────
             "mempalace_status" => {
-                let count = self.db.get_drawer_count();
+                let count = self.db.get_live_drawer_count();
                 let wings = self.db.get_wing_counts()?;
                 let rooms = self.db.get_room_counts(None)?;
                 let health = self.db.vec0_health();
@@ -414,6 +415,7 @@ impl<'a> Server<'a> {
                 let source_file = get_str(args, "source_file");
                 let max_distance = get_f64(args, "max_distance").unwrap_or(1.5);
                 let sort_by = get_str(args, "sort_by").unwrap_or("relevance");
+                let include_expired = get_bool(args, "include_expired").unwrap_or(false);
                 let mut results = self.db.search_filtered(
                     query,
                     limit,
@@ -426,6 +428,7 @@ impl<'a> Server<'a> {
                     max_distance,
                     self.embedder.as_ref(),
                     sort_by,
+                    include_expired,
                 )?;
                 if sanitized.was_sanitized {
                     if let Some(obj) = results.as_object_mut() {
@@ -471,6 +474,7 @@ impl<'a> Server<'a> {
                 let content = validate::sanitize_content(content_raw)?;
                 let source_file = get_str(args, "source_file");
                 let added_by = get_str(args, "added_by").unwrap_or("mcp");
+                let expires_at = parse_expires_at(get_str(args, "expires_at"))?;
 
                 // Duplicate check at threshold 0.9
                 let dup = self
@@ -489,13 +493,14 @@ impl<'a> Server<'a> {
                     }))?);
                 }
 
-                let drawer_id = self.db.add_drawer(
+                let drawer_id = self.db.add_drawer_ex(
                     wing,
                     room,
                     content,
                     source_file,
                     added_by,
                     self.embedder.as_ref(),
+                    expires_at,
                 )?;
                 wal::log_write(
                     "add_drawer",
@@ -848,9 +853,16 @@ impl<'a> Server<'a> {
                 let offset = get_i64(args, "offset").unwrap_or(0) as usize;
                 let since = validate::sanitize_iso_date(get_str(args, "since"))?;
                 let before = validate::sanitize_iso_date(get_str(args, "before"))?;
-                let result = self
-                    .db
-                    .list_drawers_range(wing, room, limit, offset, since, before)?;
+                let include_expired = get_bool(args, "include_expired").unwrap_or(false);
+                let result = self.db.list_drawers_range(
+                    wing,
+                    room,
+                    limit,
+                    offset,
+                    since,
+                    before,
+                    include_expired,
+                )?;
                 Ok(serde_json::to_string(&result)?)
             }
 
@@ -971,6 +983,15 @@ impl<'a> Server<'a> {
                 }))?)
             }
 
+            "mempalace_purge_expired" => {
+                let dry_run = get_bool(args, "dry_run").unwrap_or(true);
+                let result = self.db.purge_expired(dry_run)?;
+                if !dry_run {
+                    wal::log_write("purge_expired", json!({"purged": result.get("purged")}));
+                }
+                Ok(serde_json::to_string(&result)?)
+            }
+
             "mempalace_delete_hallway" => {
                 let id = get_str(args, "hallway_id")
                     .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: hallway_id"))?;
@@ -1012,6 +1033,20 @@ fn get_f64(args: &Value, key: &str) -> Option<f64> {
         Value::Number(n) => n.as_f64(),
         _ => None,
     })
+}
+
+fn parse_expires_at(val: Option<&str>) -> anyhow::Result<Option<&str>> {
+    let Some(s) = val.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let cleaned = s.trim_end_matches('Z');
+    match validate::sanitize_iso_date(Some(cleaned)) {
+        Ok(Some(_)) => Ok(Some(s)),
+        Ok(None) => Ok(None),
+        Err(_) => Err(anyhow::anyhow!(
+            "InvalidExpiresAt: expected ISO datetime (YYYY-MM-DD[THH:MM:SS])"
+        )),
+    }
 }
 
 fn normalize_agent_name(name: &str) -> String {
@@ -1056,5 +1091,16 @@ mod tests {
         assert!(TOOLS_JSON.contains("source_drawer_id"));
         assert!(TOOLS_JSON.contains("mempalace_list_hallways"));
         assert!(TOOLS_JSON.contains("mempalace_delete_hallway"));
+        assert!(TOOLS_JSON.contains("mempalace_purge_expired"));
+        assert!(TOOLS_JSON.contains("include_expired"));
+        assert!(TOOLS_JSON.contains("expires_at"));
+    }
+
+    #[test]
+    fn test_add_drawer_rejects_malformed_expires_at() {
+        let err = parse_expires_at(Some("yesterday")).unwrap_err().to_string();
+        assert!(err.starts_with("InvalidExpiresAt"), "{err}");
+        assert!(parse_expires_at(Some("2027-01-01T00:00:00Z")).is_ok());
+        assert!(parse_expires_at(None).unwrap().is_none());
     }
 }

@@ -126,6 +126,7 @@ impl Database {
         Self::ensure_column(&self.conn, "triples", "source_file", "TEXT")?;
         Self::ensure_column(&self.conn, "triples", "source_drawer_id", "TEXT")?;
         Self::ensure_column(&self.conn, "drawers", "authored_at", "DATETIME")?;
+        Self::ensure_column(&self.conn, "drawers", "expires_at", "DATETIME")?;
         let _ = self.conn.execute(
             "UPDATE drawers SET authored_at = filed_at WHERE authored_at IS NULL",
             [],
@@ -167,6 +168,17 @@ impl Database {
     pub fn get_drawer_count(&self) -> i64 {
         self.conn
             .query_row("SELECT COUNT(*) FROM drawers", [], |r| r.get(0))
+            .unwrap_or(0)
+    }
+
+    /// Live (non-expired) drawer count for status/taxonomy-style reads.
+    pub fn get_live_drawer_count(&self) -> i64 {
+        self.conn
+            .query_row(
+                "SELECT COUNT(*) FROM drawers WHERE expires_at IS NULL OR expires_at > datetime('now')",
+                [],
+                |r| r.get(0),
+            )
             .unwrap_or(0)
     }
 
@@ -283,7 +295,7 @@ impl Database {
     pub fn get_wing_counts(&self) -> Result<Value> {
         let mut stmt = self
             .conn
-            .prepare("SELECT wing, COUNT(*) FROM drawers GROUP BY wing")?;
+            .prepare("SELECT wing, COUNT(*) FROM drawers WHERE expires_at IS NULL OR expires_at > datetime('now') GROUP BY wing")?;
         let mut obj = serde_json::Map::new();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -299,7 +311,7 @@ impl Database {
         if let Some(wing) = wing_filter {
             let mut stmt = self
                 .conn
-                .prepare("SELECT room, COUNT(*) FROM drawers WHERE wing = ?1 GROUP BY room")?;
+                .prepare("SELECT room, COUNT(*) FROM drawers WHERE wing = ?1 AND (expires_at IS NULL OR expires_at > datetime('now')) GROUP BY room")?;
             let mut rows = stmt.query(params![wing])?;
             while let Some(row) = rows.next()? {
                 let room: String = row.get(0)?;
@@ -309,7 +321,7 @@ impl Database {
         } else {
             let mut stmt = self
                 .conn
-                .prepare("SELECT room, COUNT(*) FROM drawers GROUP BY room")?;
+                .prepare("SELECT room, COUNT(*) FROM drawers WHERE expires_at IS NULL OR expires_at > datetime('now') GROUP BY room")?;
             let mut rows = stmt.query([])?;
             while let Some(row) = rows.next()? {
                 let room: String = row.get(0)?;
@@ -323,7 +335,7 @@ impl Database {
     pub fn get_taxonomy(&self) -> Result<Value> {
         let mut stmt = self
             .conn
-            .prepare("SELECT wing, room, COUNT(*) FROM drawers GROUP BY wing, room")?;
+            .prepare("SELECT wing, room, COUNT(*) FROM drawers WHERE expires_at IS NULL OR expires_at > datetime('now') GROUP BY wing, room")?;
         let mut root = serde_json::Map::new();
         let mut rows = stmt.query([])?;
         while let Some(row) = rows.next()? {
@@ -477,6 +489,7 @@ impl Database {
             1.5,
             embedder,
             sort_by,
+            false,
         )
     }
 
@@ -496,6 +509,7 @@ impl Database {
         max_distance: f64,
         embedder: Option<&Embedder>,
         sort_by: &str,
+        include_expired: bool,
     ) -> Result<Value> {
         let limit = limit.clamp(1, 1000);
         if self.vector_disabled {
@@ -508,6 +522,7 @@ impl Database {
                 filed_after,
                 filed_before,
                 source_file,
+                include_expired,
             );
         }
         if sort_by == "recency" {
@@ -520,6 +535,7 @@ impl Database {
                 filed_after,
                 filed_before,
                 source_file,
+                include_expired,
             );
         }
         let use_recency = sort_by == "hybrid";
@@ -536,6 +552,7 @@ impl Database {
                 max_distance,
                 emb,
                 use_recency,
+                include_expired,
             );
         }
         self.fts_search(
@@ -547,10 +564,42 @@ impl Database {
             filed_after,
             filed_before,
             source_file,
+            include_expired,
         )
     }
 
     // ── filter clause builder (shared by all search functions) ─────────────────
+
+    fn expires_clause(include_expired: bool) -> &'static str {
+        if include_expired {
+            ""
+        } else {
+            " AND (d.expires_at IS NULL OR d.expires_at > datetime('now'))"
+        }
+    }
+
+    fn annotate_expired(&self, results: &mut [Value]) {
+        for item in results.iter_mut() {
+            let Some(id) = item
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+            else {
+                continue;
+            };
+            let expired: bool = self
+                .conn
+                .query_row(
+                    "SELECT expires_at IS NOT NULL AND expires_at <= datetime('now') FROM drawers WHERE id = ?1",
+                    params![id],
+                    |r| r.get(0),
+                )
+                .unwrap_or(false);
+            if expired {
+                item["expired"] = json!(true);
+            }
+        }
+    }
 
     /// Builds `AND d.wing = ?N AND d.room = ?M` clauses and collects param values.
     /// Returns (sql_fragment, filter_params) where sql_fragment is empty when
@@ -618,6 +667,7 @@ impl Database {
         filed_after: Option<&str>,
         filed_before: Option<&str>,
         source_file: Option<&str>,
+        include_expired: bool,
     ) -> Result<Value> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
@@ -625,12 +675,13 @@ impl Database {
             Self::build_date_clause(filed_after, filed_before, 2 + filter_params.len());
         let (src_sql, src_params) =
             Self::build_source_clause(source_file, 2 + filter_params.len() + date_params.len());
+        let exp_sql = Self::expires_clause(include_expired);
 
         // Total count query (before limit/offset)
         let count_sql = format!(
             "SELECT COUNT(*) FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}"
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}{exp_sql}"
         );
         let mut count_params = vec![SqlValue::Text(safe_query.clone())];
         count_params.extend(filter_params.clone());
@@ -652,7 +703,7 @@ impl Database {
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at, d.source_file, rank
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}{exp_sql}
              ORDER BY rank, COALESCE(d.authored_at, d.filed_at) DESC, d.id ASC LIMIT {limit} OFFSET {offset}"
         );
 
@@ -695,6 +746,10 @@ impl Database {
             }
         }
 
+        if include_expired {
+            self.annotate_expired(&mut results);
+        }
+
         Ok(json!({
             "results": results,
             "total": total,
@@ -713,6 +768,7 @@ impl Database {
         filed_after: Option<&str>,
         filed_before: Option<&str>,
         source_file: Option<&str>,
+        include_expired: bool,
     ) -> Vec<FtsRawRow> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
@@ -720,11 +776,12 @@ impl Database {
             Self::build_date_clause(filed_after, filed_before, 2 + filter_params.len());
         let (src_sql, src_params) =
             Self::build_source_clause(source_file, 2 + filter_params.len() + date_params.len());
+        let exp_sql = Self::expires_clause(include_expired);
         let sql = format!(
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at, d.source_file
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}{exp_sql}
              ORDER BY rank LIMIT {fetch}"
         );
 
@@ -762,17 +819,19 @@ impl Database {
         filed_after: Option<&str>,
         filed_before: Option<&str>,
         source_file: Option<&str>,
+        include_expired: bool,
     ) -> Vec<VecResultRow> {
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
         let (date_sql, date_params) =
             Self::build_date_clause(filed_after, filed_before, 2 + filter_params.len());
         let (src_sql, src_params) =
             Self::build_source_clause(source_file, 2 + filter_params.len() + date_params.len());
+        let exp_sql = Self::expires_clause(include_expired);
         let sql = format!(
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at, d.source_file, v.distance
              FROM vec_drawers v
              JOIN drawers d ON v.rowid = d.rowid
-             WHERE v.embedding MATCH ?1 AND k = {fetch}{filter_sql}{date_sql}{src_sql}
+             WHERE v.embedding MATCH ?1 AND k = {fetch}{filter_sql}{date_sql}{src_sql}{exp_sql}
              ORDER BY v.distance"
         );
 
@@ -815,6 +874,7 @@ impl Database {
         max_distance: f64,
         embedder: &Embedder,
         use_recency: bool,
+        include_expired: bool,
     ) -> Result<Value> {
         use std::collections::HashMap;
         const K: f64 = 60.0;
@@ -829,6 +889,7 @@ impl Database {
                 filed_after,
                 filed_before,
                 source_file,
+                include_expired,
             )
         } else {
             vec![]
@@ -846,6 +907,7 @@ impl Database {
             filed_after,
             filed_before,
             source_file,
+            include_expired,
         );
 
         if vec_hits.is_empty() && fts_hits.is_empty() {
@@ -937,7 +999,7 @@ impl Database {
 
         let total = ranked.len();
 
-        let results: Vec<Value> = ranked
+        let mut results: Vec<Value> = ranked
             .into_iter()
             .skip(offset)
             .take(limit)
@@ -954,6 +1016,10 @@ impl Database {
                 Some(obj)
             })
             .collect();
+
+        if include_expired {
+            self.annotate_expired(&mut results);
+        }
 
         Ok(json!({
             "results": results,
@@ -974,6 +1040,7 @@ impl Database {
         filed_after: Option<&str>,
         filed_before: Option<&str>,
         source_file: Option<&str>,
+        include_expired: bool,
     ) -> Result<Value> {
         let safe_query = sanitize_fts_query(query);
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 2);
@@ -981,12 +1048,13 @@ impl Database {
             Self::build_date_clause(filed_after, filed_before, 2 + filter_params.len());
         let (src_sql, src_params) =
             Self::build_source_clause(source_file, 2 + filter_params.len() + date_params.len());
+        let exp_sql = Self::expires_clause(include_expired);
 
         // Total count
         let count_sql = format!(
             "SELECT COUNT(*) FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}"
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}{exp_sql}"
         );
         let mut count_params = vec![SqlValue::Text(safe_query.clone())];
         count_params.extend(filter_params.clone());
@@ -1008,7 +1076,7 @@ impl Database {
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at, d.source_file
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
-             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}
+             WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}{exp_sql}
              ORDER BY COALESCE(d.authored_at, d.filed_at) DESC LIMIT {limit} OFFSET {offset}"
         );
 
@@ -1048,6 +1116,10 @@ impl Database {
                     "rank": 0.0,
                 }));
             }
+        }
+
+        if include_expired {
+            self.annotate_expired(&mut results);
         }
 
         Ok(json!({
@@ -1109,6 +1181,7 @@ impl Database {
                            FROM vec_drawers v
                            JOIN drawers d ON v.rowid = d.rowid
                            WHERE v.embedding MATCH ?1 AND k = 5
+                             AND (d.expires_at IS NULL OR d.expires_at > datetime('now'))
                            ORDER BY v.distance";
                 if let Ok(mut stmt) = self.conn.prepare(sql) {
                     let mut matches = Vec::new();
@@ -1153,7 +1226,7 @@ impl Database {
         let row: Option<(String, String, String, String)> = self
             .conn
             .query_row(
-                "SELECT id, wing, room, content FROM drawers WHERE content = ?1 LIMIT 1",
+                "SELECT id, wing, room, content FROM drawers WHERE content = ?1 AND (expires_at IS NULL OR expires_at > datetime('now')) LIMIT 1",
                 params![content],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
@@ -1247,6 +1320,20 @@ impl Database {
         added_by: &str,
         embedder: Option<&Embedder>,
     ) -> Result<String> {
+        self.add_drawer_ex(wing, room, content, source_file, added_by, embedder, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_drawer_ex(
+        &self,
+        wing: &str,
+        room: &str,
+        content: &str,
+        source_file: Option<&str>,
+        added_by: &str,
+        embedder: Option<&Embedder>,
+        expires_at: Option<&str>,
+    ) -> Result<String> {
         // Generate deterministic ID: MD5(content + wing + room)
         let mut ctx = md5::Context::new();
         ctx.consume(content.as_bytes());
@@ -1256,11 +1343,13 @@ impl Database {
         let hex = format!("{:x}", hash);
         let drawer_id = format!("drawer_{}_{}_{}", wing, room, &hex[..16]);
 
+        let expires = expires_at.map(normalize_expires_at);
+
         with_busy_retry(|| {
             self.conn.execute(
-            "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, added_by, filed_at, authored_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
-            params![drawer_id, wing, room, content, source_file, added_by],
+            "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, added_by, filed_at, authored_at, expires_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'), ?7)",
+            params![drawer_id, wing, room, content, source_file, added_by, expires],
         )
         })
         .map_err(|e| anyhow!("{e}"))?;
@@ -1541,6 +1630,36 @@ impl Database {
             "success": true,
             "dry_run": false,
             "deleted": match_count,
+            "ids": ids,
+        }))
+    }
+
+    pub fn purge_expired(&self, dry_run: bool) -> Result<Value> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM drawers WHERE expires_at IS NOT NULL AND expires_at <= datetime('now')",
+        )?;
+        let ids: Vec<String> = stmt
+            .query_map([], |r| r.get(0))?
+            .filter_map(|r| r.ok())
+            .collect();
+        let match_count = ids.len();
+        let sample: Vec<String> = ids.iter().take(5).cloned().collect();
+        if dry_run {
+            return Ok(json!({
+                "success": true,
+                "dry_run": true,
+                "match_count": match_count,
+                "sample": sample,
+                "hint": "Pass dry_run=false to permanently delete expired drawers.",
+            }));
+        }
+        for id in &ids {
+            self.delete_drawer(id)?;
+        }
+        Ok(json!({
+            "success": true,
+            "dry_run": false,
+            "purged": match_count,
             "ids": ids,
         }))
     }
@@ -1988,11 +2107,12 @@ impl Database {
         } else {
             String::new()
         };
+        let exp_sql = Self::expires_clause(false);
 
         let sql = format!(
             "SELECT d.id, d.wing, d.room, d.content, d.filed_at
              FROM drawers d
-             WHERE 1=1{filter_sql}{since_clause}
+             WHERE 1=1{filter_sql}{since_clause}{exp_sql}
              ORDER BY d.filed_at DESC LIMIT {limit}"
         );
 
@@ -2334,9 +2454,10 @@ impl Database {
         limit: usize,
         offset: usize,
     ) -> Result<Value> {
-        self.list_drawers_range(wing, room, limit, offset, None, None)
+        self.list_drawers_range(wing, room, limit, offset, None, None, false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn list_drawers_range(
         &self,
         wing: Option<&str>,
@@ -2345,11 +2466,14 @@ impl Database {
         offset: usize,
         since: Option<&str>,
         before: Option<&str>,
+        include_expired: bool,
     ) -> Result<Value> {
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 1);
         let (date_sql, date_params) =
             Self::build_date_clause(since, before, 1 + filter_params.len());
-        let count_sql = format!("SELECT COUNT(*) FROM drawers d WHERE 1=1{filter_sql}{date_sql}");
+        let exp_sql = Self::expires_clause(include_expired);
+        let count_sql =
+            format!("SELECT COUNT(*) FROM drawers d WHERE 1=1{filter_sql}{date_sql}{exp_sql}");
         let mut count_params = filter_params.clone();
         count_params.extend(date_params.clone());
         let total: i64 = self
@@ -2365,7 +2489,7 @@ impl Database {
             .unwrap_or(0);
 
         let sql = format!(
-            "SELECT id, wing, room, content, source_file, filed_at, authored_at FROM drawers d WHERE 1=1{filter_sql}{date_sql} ORDER BY COALESCE(authored_at, filed_at) DESC LIMIT {limit} OFFSET {offset}"
+            "SELECT id, wing, room, content, source_file, filed_at, authored_at FROM drawers d WHERE 1=1{filter_sql}{date_sql}{exp_sql} ORDER BY COALESCE(authored_at, filed_at) DESC LIMIT {limit} OFFSET {offset}"
         );
         let mut stmt = self
             .conn
@@ -2373,11 +2497,15 @@ impl Database {
             .map_err(|_| anyhow!("query error"))?;
         let mut all_params = filter_params;
         all_params.extend(date_params);
-        let rows: Vec<Value> = stmt.query_map(rusqlite::params_from_iter(all_params.iter()), |r| {
+        let mut rows: Vec<Value> = stmt.query_map(rusqlite::params_from_iter(all_params.iter()), |r| {
             let doc: String = r.get(3)?;
             let preview: String = doc.chars().take(200).collect();
             Ok(json!({"id": r.get::<_,String>(0)?,"wing": r.get::<_,String>(1)?,"room": r.get::<_,String>(2)?,"content_preview": preview,"source_file": r.get::<_,Option<String>>(4)?,"filed_at": r.get::<_,Option<String>>(5)?,"authored_at": r.get::<_,Option<String>>(6)?}))
         }).map(|iter| iter.filter_map(|r| r.ok()).collect()).unwrap_or_default();
+
+        if include_expired {
+            self.annotate_expired(&mut rows);
+        }
 
         Ok(json!({"drawers": rows, "total": total, "limit": limit, "offset": offset}))
     }
@@ -2407,6 +2535,10 @@ where
         }
     }
     unreachable!()
+}
+
+fn normalize_expires_at(s: &str) -> String {
+    s.replace('T', " ").trim_end_matches('Z').trim().to_string()
 }
 
 /// Parse a `filed_at` string (format "YYYY-MM-DD HH:MM:SS" or ISO) into seconds
@@ -3491,6 +3623,7 @@ mod tests {
                 1.5,
                 None,
                 "relevance",
+                false,
             )
             .unwrap();
         let arr = results["results"].as_array().unwrap();
@@ -3523,6 +3656,7 @@ mod tests {
                 1.5,
                 None,
                 "relevance",
+                false,
             )
             .unwrap();
         assert_eq!(results["results"].as_array().unwrap().len(), 0);
@@ -3564,6 +3698,7 @@ mod tests {
                 1.5,
                 None,
                 "relevance",
+                false,
             )
             .unwrap();
         let arr = results["results"].as_array().unwrap();
@@ -3620,6 +3755,7 @@ mod tests {
                 0.0,
                 None,
                 "relevance",
+                false,
             )
             .unwrap();
         assert!(!results["results"].as_array().unwrap().is_empty());
@@ -3651,6 +3787,7 @@ mod tests {
                 0.3,
                 None,
                 "relevance",
+                false,
             )
             .unwrap();
         assert!(results["results"].as_array().unwrap().is_empty());
@@ -4406,7 +4543,15 @@ mod tests {
             [],
         ).unwrap();
         let r = db
-            .list_drawers_range(None, None, 10, 0, Some("2024-03-01"), Some("2024-12-01"))
+            .list_drawers_range(
+                None,
+                None,
+                10,
+                0,
+                Some("2024-03-01"),
+                Some("2024-12-01"),
+                false,
+            )
             .unwrap();
         assert_eq!(r["total"], 1);
         assert_eq!(r["drawers"][0]["id"], "b");
@@ -4474,5 +4619,396 @@ mod tests {
             });
         });
         assert!(db.get_drawer_count() >= 1);
+    }
+
+    fn drawer_cols(db: &Database) -> Vec<String> {
+        db.conn
+            .prepare("PRAGMA table_info(drawers)")
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect()
+    }
+
+    fn set_expires_sql(db: &Database, id: &str, modifier: &str) {
+        db.conn
+            .execute(
+                &format!(
+                    "UPDATE drawers SET expires_at = datetime('now', '{modifier}') WHERE id = ?1"
+                ),
+                params![id],
+            )
+            .unwrap();
+    }
+
+    // ── Phase 22: expires_at ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_open_adds_expires_at_column() {
+        let (_dir, db) = test_db();
+        assert!(drawer_cols(&db).contains(&"expires_at".to_string()));
+
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("palace.db");
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE drawers (
+                    id TEXT PRIMARY KEY,
+                    wing TEXT NOT NULL,
+                    room TEXT NOT NULL,
+                    content TEXT NOT NULL,
+                    source_file TEXT,
+                    added_by TEXT,
+                    filed_at DATETIME
+                );",
+            )
+            .unwrap();
+        }
+        let legacy = Database::open(dir.path().to_str().unwrap()).unwrap();
+        assert!(drawer_cols(&legacy).contains(&"expires_at".to_string()));
+    }
+
+    #[test]
+    fn test_open_migration_idempotent() {
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().to_str().unwrap();
+        {
+            let _db = Database::open(p).unwrap();
+        }
+        let db = Database::open(p).unwrap();
+        assert_eq!(
+            drawer_cols(&db)
+                .iter()
+                .filter(|c| *c == "expires_at")
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_add_drawer_stores_expires_at() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer_ex(
+                "w",
+                "r",
+                "ttl content",
+                None,
+                "test",
+                None,
+                Some("2027-01-01T00:00:00Z"),
+            )
+            .unwrap();
+        let got: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT expires_at FROM drawers WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let got = got.unwrap();
+        assert!(got.starts_with("2027-01-01"), "stored expires_at={got}");
+    }
+
+    #[test]
+    fn test_add_drawer_default_null_expires_at() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "no ttl", None, "test", None)
+            .unwrap();
+        let got: Option<String> = db
+            .conn
+            .query_row(
+                "SELECT expires_at FROM drawers WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(got.is_none());
+    }
+
+    #[test]
+    fn test_search_excludes_expired_drawer() {
+        let (_dir, db) = test_db();
+        let live = db
+            .add_drawer("w", "r", "expirium livewidget unique", None, "test", None)
+            .unwrap();
+        let dead = db
+            .add_drawer("w", "r", "expirium deadwidget unique", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let results = db
+            .search(
+                "expirium unique",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        let ids: Vec<&str> = results["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(ids.contains(&live.as_str()));
+        assert!(!ids.contains(&dead.as_str()));
+    }
+
+    #[test]
+    fn test_search_fts_fallback_excludes_expired() {
+        let (_dir, mut db) = test_db();
+        db.vector_disabled = true;
+        let live = db
+            .add_drawer("w", "r", "ftsexpiry livealpha unique", None, "test", None)
+            .unwrap();
+        let dead = db
+            .add_drawer("w", "r", "ftsexpiry deadalpha unique", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let results = db
+            .search(
+                "ftsexpiry unique",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        let ids: Vec<&str> = results["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(ids.contains(&live.as_str()));
+        assert!(!ids.contains(&dead.as_str()));
+    }
+
+    #[test]
+    fn test_hybrid_search_excludes_expired() {
+        let (_dir, db) = test_db();
+        let live = db
+            .add_drawer("w", "r", "hybexpiry livebeta unique", None, "test", None)
+            .unwrap();
+        let dead = db
+            .add_drawer("w", "r", "hybexpiry deadbeta unique", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let results = db
+            .search(
+                "hybexpiry unique",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "hybrid",
+            )
+            .unwrap();
+        let ids: Vec<&str> = results["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(ids.contains(&live.as_str()));
+        assert!(!ids.contains(&dead.as_str()));
+    }
+
+    #[test]
+    fn test_list_drawers_excludes_expired() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "list live", None, "test", None)
+            .unwrap();
+        let dead = db
+            .add_drawer("w", "r", "list dead", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let listed = db.list_drawers(Some("w"), Some("r"), 20, 0).unwrap();
+        let ids: Vec<&str> = listed["drawers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert_eq!(listed["total"].as_i64().unwrap(), 1);
+        assert!(!ids.contains(&dead.as_str()));
+    }
+
+    #[test]
+    fn test_taxonomy_and_status_exclude_expired() {
+        let (_dir, db) = test_db();
+        db.add_drawer("taxw", "r", "tax live", None, "test", None)
+            .unwrap();
+        let dead = db
+            .add_drawer("taxw", "r", "tax dead", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let tax = db.get_taxonomy().unwrap();
+        assert_eq!(tax["taxw"]["r"].as_i64().unwrap(), 1);
+        let wings = db.get_wing_counts().unwrap();
+        assert_eq!(wings["taxw"].as_i64().unwrap(), 1);
+        assert_eq!(db.get_live_drawer_count(), 1);
+        assert_eq!(db.get_drawer_count(), 2);
+    }
+
+    #[test]
+    fn test_boundary_expires_at_now_is_expired() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "boundary expiry unique", None, "test", None)
+            .unwrap();
+        db.conn
+            .execute(
+                "UPDATE drawers SET expires_at = datetime('now') WHERE id = ?1",
+                params![id],
+            )
+            .unwrap();
+        let results = db
+            .search(
+                "boundary expiry unique",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        let ids: Vec<&str> = results["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|r| r["id"].as_str())
+            .collect();
+        assert!(!ids.contains(&id.as_str()));
+    }
+
+    #[test]
+    fn test_include_expired_returns_both() {
+        let (_dir, db) = test_db();
+        let live = db
+            .add_drawer("w", "r", "inclexpiry livegamma unique", None, "test", None)
+            .unwrap();
+        let dead = db
+            .add_drawer("w", "r", "inclexpiry deadgamma unique", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let results = db
+            .search_filtered(
+                "inclexpiry unique",
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                1.5,
+                None,
+                "relevance",
+                true,
+            )
+            .unwrap();
+        let arr = results["results"].as_array().unwrap();
+        let ids: Vec<&str> = arr.iter().filter_map(|r| r["id"].as_str()).collect();
+        assert!(ids.contains(&live.as_str()));
+        assert!(ids.contains(&dead.as_str()));
+        let dead_hit = arr.iter().find(|r| r["id"] == dead).unwrap();
+        assert_eq!(dead_hit["expired"], json!(true));
+        let listed = db
+            .list_drawers_range(Some("w"), Some("r"), 20, 0, None, None, true)
+            .unwrap();
+        assert_eq!(listed["total"].as_i64().unwrap(), 2);
+        let dead_list = listed["drawers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["id"] == dead)
+            .unwrap();
+        assert_eq!(dead_list["expired"], json!(true));
+    }
+
+    #[test]
+    fn test_purge_expired_dry_run_does_not_delete() {
+        let (_dir, db) = test_db();
+        let dead = db
+            .add_drawer("w", "r", "purge dry", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let result = db.purge_expired(true).unwrap();
+        assert_eq!(result["dry_run"], json!(true));
+        assert_eq!(result["match_count"].as_u64().unwrap(), 1);
+        assert!(result["sample"].as_array().unwrap().len() <= 5);
+        assert!(result.get("hint").is_some());
+        let still: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM drawers WHERE id=?1",
+                params![dead],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(still, 1);
+    }
+
+    #[test]
+    fn test_purge_expired_commit_removes_rows_and_vectors() {
+        let (_dir, db) = test_db();
+        let dead = db
+            .add_drawer("w", "r", "purge commit", None, "test", None)
+            .unwrap();
+        let live = db
+            .add_drawer("w", "r", "purge keep", None, "test", None)
+            .unwrap();
+        set_expires_sql(&db, &dead, "-1 day");
+        let result = db.purge_expired(false).unwrap();
+        assert_eq!(result["dry_run"], json!(false));
+        assert_eq!(result["purged"].as_u64().unwrap(), 1);
+        let dead_n: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM drawers WHERE id=?1",
+                params![dead],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let live_n: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM drawers WHERE id=?1",
+                params![live],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(dead_n, 0);
+        assert_eq!(live_n, 1);
+    }
+
+    #[test]
+    fn test_purge_expired_nothing_to_purge() {
+        let (_dir, db) = test_db();
+        db.add_drawer("w", "r", "still live", None, "test", None)
+            .unwrap();
+        let result = db.purge_expired(false).unwrap();
+        assert_eq!(result["success"], json!(true));
+        assert_eq!(result["purged"].as_u64().unwrap(), 0);
     }
 }

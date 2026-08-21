@@ -22,13 +22,13 @@ Progress log, and git status — not chat history.
 
 | Field | Value |
 |-------|-------|
-| Status | `done` |
-| Active phase | 21 |
-| Active task | *(done)* |
-| Last completed task | 21.3 |
-| WIP notes | — |
+| Status | `in_progress` |
+| Active phase | 23 |
+| Active task | 23.1 profile computation |
+| Last completed task | 22.5 |
+| WIP notes | Phase 22 done. Continuing 23–25. |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 211 passed; clippy -D warnings clean; v3.1.0 (2026-08-21) |
+| Last verification | `cargo test --release` 226 passed; clippy -D warnings clean (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -240,7 +240,7 @@ when available. FTS-only path: `rank` is BM25/RRF; omit `distance`.
       unless it also fails FTS — construct the unrelated doc so FTS misses it.
 - [x] `test_max_distance_zero_disables_filter` — `0.0` means “no cutoff”
       (Python: “Set to 0 to disable”).
-- [ ] Default when omitted: `1.5` (Python default).
+- [x] Default when omitted: `1.5` (Python default).
 
 Apply cutoff **only** to the vector candidate list before RRF, not to FTS.
 
@@ -711,9 +711,9 @@ declares a TTL at write time, the engine enforces it at read time.
 
 ### 22.1 Schema migration
 
-- [ ] `test_open_adds_expires_at_column` — fresh + legacy DB both end up
+- [x] `test_open_adds_expires_at_column` — fresh + legacy DB both end up
       with the column (`PRAGMA table_info(drawers)`).
-- [ ] `test_open_migration_idempotent` — open twice; second open does not
+- [x] `test_open_migration_idempotent` — open twice; second open does not
       error or duplicate the column.
 
 Guard with the existing `PRAGMA table_info` helper pattern used by other
@@ -721,10 +721,10 @@ optional columns.
 
 ### 22.2 Write path
 
-- [ ] `test_add_drawer_stores_expires_at` — insert with
+- [x] `test_add_drawer_stores_expires_at` — insert with
       `expires_at = Some("2027-01-01T00:00:00Z")`; row reads back equal.
-- [ ] `test_add_drawer_default_null_expires_at` — omitted → `NULL`.
-- [ ] `test_add_drawer_rejects_malformed_expires_at` — non-ISO string →
+- [x] `test_add_drawer_default_null_expires_at` — omitted → `NULL`.
+- [x] `test_add_drawer_rejects_malformed_expires_at` — non-ISO string →
       error at the MCP boundary (`InvalidExpiresAt`), not raw rusqlite.
 
 Extend `add_drawer` / `upsert_drawer` with
@@ -732,15 +732,15 @@ Extend `add_drawer` / `upsert_drawer` with
 
 ### 22.3 Read paths exclude expired
 
-- [ ] `test_search_excludes_expired_drawer` — two matching drawers, one
+- [x] `test_search_excludes_expired_drawer` — two matching drawers, one
       expired yesterday; only the live one returns.
-- [ ] `test_search_fts_fallback_excludes_expired` — with
+- [x] `test_search_fts_fallback_excludes_expired` — with
       `vector_disabled = true`, same behavior.
-- [ ] `test_hybrid_search_excludes_expired` — expired drawer absent from
+- [x] `test_hybrid_search_excludes_expired` — expired drawer absent from
       RRF fusion even though its vec row still exists.
-- [ ] `test_list_drawers_excludes_expired`
-- [ ] `test_taxonomy_and_status_exclude_expired` — counts drop.
-- [ ] `test_boundary_expires_at_now_is_expired` — `expires_at == now`
+- [x] `test_list_drawers_excludes_expired`
+- [x] `test_taxonomy_and_status_exclude_expired` — counts drop.
+- [x] `test_boundary_expires_at_now_is_expired` — `expires_at == now`
       counts as expired (half-open window, matches KG convention).
 
 Implementation: add `AND (d.expires_at IS NULL OR d.expires_at >
@@ -750,7 +750,7 @@ rows on expiry — purge (22.5) owns deletion.
 
 ### 22.4 Opt-in visibility
 
-- [ ] `test_include_expired_returns_both` — `include_expired: true` on
+- [x] `test_include_expired_returns_both` — `include_expired: true` on
       search/list returns live + expired; expired rows carry
       `"expired": true` in JSON.
 
@@ -763,10 +763,10 @@ Dry-run default `true` (same contract as 17.2 `delete_by_source`).
 Commit deletes drawers **and** their vec/FTS rows via existing
 `delete_drawer`. WAL entry `purge_expired {purged: N}` on commit.
 
-- [ ] `test_purge_expired_dry_run_does_not_delete` — returns
+- [x] `test_purge_expired_dry_run_does_not_delete` — returns
       `match_count`, `sample` (≤5 ids), `hint`.
-- [ ] `test_purge_expired_commit_removes_rows_and_vectors`
-- [ ] `test_purge_expired_nothing_to_purge` — success true, count 0.
+- [x] `test_purge_expired_commit_removes_rows_and_vectors`
+- [x] `test_purge_expired_nothing_to_purge` — success true, count 0.
 
 MCP schema next to maintenance tools.
 
@@ -994,6 +994,12 @@ R@5 ≥ 94.04% floor holds; log both scores.
 - tests added: authored_at backfill/override/tie-break, list since/before, busy_timeout, busy retry, concurrent mixed ops, writer lock
 - suite: 211 passed; `cargo clippy --release -- -D warnings` clean; version 3.1.0
 - notes: flock on palace.write.lock; libc compile-time dep only
+
+### 2026-08-21 — phase 22 — expires_at + purge_expired
+
+- tests added: migration, add_drawer TTL, search/list/taxonomy hide expired, include_expired, purge dry-run/commit
+- suite: `cargo test --release` → 226 passed; clippy -D warnings clean
+- notes: half-open `expires_at <= now`; `add_drawer_ex`; MCP `mempalace_purge_expired` dry-run default true; `InvalidExpiresAt` at MCP boundary
 
 ## Parking lot
 
