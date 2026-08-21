@@ -75,6 +75,8 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_purge_expired","description":"Hard-delete drawers whose expires_at has passed. Dry-run by default.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"Default true \u2014 preview only"}}}},"#,
     r#"{"name":"mempalace_profile","description":"Derived user/entity profile: open KG triples (static) plus recent matching drawers (dynamic). No LLM.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"KG subject / search term (default user)"},"dynamic_limit":{"type":"integer","description":"Max recent matching drawers (default 10, max 50)"}}}},"#,
     r#"{"name":"mempalace_context","description":"One-call session start: profile + recent drawers + diary tail.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"Profile entity (default user)"},"agent_name":{"type":"string","description":"Diary agent (optional)"},"recent_limit":{"type":"integer","description":"Recent drawers (default 5)"},"diary_limit":{"type":"integer","description":"Diary entries (default 3)"}}}},"#,
+    r#"{"name":"mempalace_memory","description":"Call automatically whenever the user shares a durable fact, preference, or decision. action=save files content (defaults wing=memory, room=slug of first words). action=forget deletes by drawer_id.","inputSchema":{"type":"object","properties":{"action":{"type":"string","description":"save or forget"},"content":{"type":"string"},"wing":{"type":"string"},"room":{"type":"string"},"drawer_id":{"type":"string"},"expires_at":{"type":"string"}},"required":["action"]}},"#,
+    r#"{"name":"mempalace_recall","description":"Search memory. Always call before answering questions about the user, past work, or prior decisions.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","description":"Max memories (default 5)"},"wing":{"type":"string"},"room":{"type":"string"}},"required":["query"]}},"#,
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}},"#,
     r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable. Defaults to incremental (only new sessions). Use full=true to re-import all.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
@@ -1027,6 +1029,108 @@ impl<'a> Server<'a> {
                 Ok(serde_json::to_string(&result)?)
             }
 
+            "mempalace_memory" => {
+                let action = get_str(args, "action")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: action"))?;
+                match action {
+                    "save" => {
+                        let content_raw = get_str(args, "content")
+                            .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: content"))?;
+                        let content = validate::sanitize_content(content_raw)?;
+                        let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?
+                            .unwrap_or("memory");
+                        let room = match validate::sanitize_name(get_str(args, "room"), "room")? {
+                            Some(r) => r.to_string(),
+                            None => memory_room_from_content(content),
+                        };
+                        let expires_at = parse_expires_at(get_str(args, "expires_at"))?;
+                        let drawer_id = self.db.add_drawer_ex(
+                            wing,
+                            &room,
+                            content,
+                            None,
+                            "mcp",
+                            self.embedder.as_ref(),
+                            expires_at,
+                        )?;
+                        wal::log_write(
+                            "memory_save",
+                            json!({"drawer_id": drawer_id, "wing": wing, "room": room}),
+                        );
+                        Ok(serde_json::to_string(&json!({
+                            "success": true,
+                            "action": "save",
+                            "drawer_id": drawer_id,
+                            "wing": wing,
+                            "room": room,
+                        }))?)
+                    }
+                    "forget" => {
+                        let drawer_id = get_str(args, "drawer_id")
+                            .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: drawer_id"))?;
+                        match self.db.delete_drawer(drawer_id) {
+                            Ok(()) => {
+                                wal::log_write("memory_forget", json!({"drawer_id": drawer_id}));
+                                Ok(serde_json::to_string(&json!({
+                                    "success": true,
+                                    "action": "forget",
+                                    "drawer_id": drawer_id,
+                                }))?)
+                            }
+                            Err(e) if e.to_string().contains("DrawerNotFound") => {
+                                Ok(serde_json::to_string(&json!({
+                                    "success": false,
+                                    "error": format!("DrawerNotFound: {drawer_id}"),
+                                }))?)
+                            }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    other => Err(anyhow::anyhow!(
+                        "InvalidAction: '{other}' — expected save or forget"
+                    )),
+                }
+            }
+
+            "mempalace_recall" => {
+                let query = get_str(args, "query")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: query"))?;
+                if query.trim().is_empty() {
+                    return Err(anyhow::anyhow!("MissingRequiredArg: query"));
+                }
+                let limit = get_i64(args, "limit").unwrap_or(5) as usize;
+                let limit = limit.clamp(1, 50);
+                let wing = validate::sanitize_name(get_str(args, "wing"), "wing")?;
+                let room = validate::sanitize_name(get_str(args, "room"), "room")?;
+                let sort_by = if self.embedder.is_some() {
+                    "hybrid"
+                } else {
+                    "relevance"
+                };
+                let search = self.db.search_filtered(
+                    query,
+                    limit,
+                    0,
+                    wing,
+                    room,
+                    None,
+                    None,
+                    None,
+                    1.5,
+                    self.embedder.as_ref(),
+                    sort_by,
+                    false,
+                )?;
+                let memories = search.get("results").cloned().unwrap_or(json!([]));
+                let profile_val = profile::profile(self.db, "user", 10)?;
+                Ok(serde_json::to_string(&json!({
+                    "success": true,
+                    "memories": memories,
+                    "profile": profile_val,
+                    "query": query,
+                }))?)
+            }
+
             _ => Err(anyhow::anyhow!("UnknownTool: {name}")),
         }
     }
@@ -1054,6 +1158,16 @@ fn get_f64(args: &Value, key: &str) -> Option<f64> {
         Value::Number(n) => n.as_f64(),
         _ => None,
     })
+}
+
+fn memory_room_from_content(content: &str) -> String {
+    let words: Vec<&str> = content.split_whitespace().take(6).collect();
+    let slug = crate::import_sessions::slugify(&words.join(" "));
+    if slug.is_empty() {
+        "general".to_string()
+    } else {
+        slug
+    }
 }
 
 fn parse_expires_at(val: Option<&str>) -> anyhow::Result<Option<&str>> {
@@ -1157,5 +1271,204 @@ mod tests {
         assert!(err.starts_with("InvalidExpiresAt"), "{err}");
         assert!(parse_expires_at(Some("2027-01-01T00:00:00Z")).is_ok());
         assert!(parse_expires_at(None).unwrap().is_none());
+    }
+
+    fn server_db() -> (tempfile::TempDir, Database) {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(dir.path().to_str().unwrap()).unwrap();
+        (dir, db)
+    }
+
+    #[test]
+    fn test_memory_save_creates_drawer_with_defaults() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool(
+                "mempalace_memory",
+                &json!({"action": "save", "content": "prefers dark mode always"}),
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["success"], json!(true));
+        assert_eq!(v["wing"], "memory");
+        assert!(v["drawer_id"].as_str().unwrap().contains("memory"));
+        let room = v["room"].as_str().unwrap();
+        assert!(room.contains("prefers") || room.contains("dark"));
+    }
+
+    #[test]
+    fn test_memory_save_honors_wing_room_overrides() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool(
+                "mempalace_memory",
+                &json!({
+                    "action": "save",
+                    "content": "override me",
+                    "wing": "customwing",
+                    "room": "customroom"
+                }),
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["wing"], "customwing");
+        assert_eq!(v["room"], "customroom");
+    }
+
+    #[test]
+    fn test_memory_save_honors_expires_at() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool(
+                "mempalace_memory",
+                &json!({
+                    "action": "save",
+                    "content": "ttl fact unique",
+                    "expires_at": "2027-01-01T00:00:00Z"
+                }),
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        let id = v["drawer_id"].as_str().unwrap();
+        let exp: String = db
+            .conn
+            .query_row("SELECT expires_at FROM drawers WHERE id=?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(exp.starts_with("2027-01-01"), "{exp}");
+    }
+
+    #[test]
+    fn test_memory_forget_deletes_drawer() {
+        let (_dir, db) = server_db();
+        let id = db
+            .add_drawer("w", "r", "to forget", None, "t", None)
+            .unwrap();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool(
+                "mempalace_memory",
+                &json!({"action": "forget", "drawer_id": id}),
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["success"], json!(true));
+        assert!(db.get_drawer(&id).is_err());
+    }
+
+    #[test]
+    fn test_memory_forget_unknown_id_errors() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool(
+                "mempalace_memory",
+                &json!({"action": "forget", "drawer_id": "missing"}),
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["success"], json!(false));
+        assert!(v["error"].as_str().unwrap().contains("DrawerNotFound"));
+    }
+
+    #[test]
+    fn test_memory_save_without_content_errors() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        let err = server
+            .execute_tool("mempalace_memory", &json!({"action": "save"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("content"), "{err}");
+    }
+
+    #[test]
+    fn test_memory_invalid_action_errors() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        let err = server
+            .execute_tool("mempalace_memory", &json!({"action": "dance"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("InvalidAction"), "{err}");
+    }
+
+    #[test]
+    fn test_recall_returns_memories_and_profile() {
+        let (_dir, db) = server_db();
+        db.add_drawer("w", "r", "switch to graphql unique", None, "t", None)
+            .unwrap();
+        let kg = KnowledgeGraph::new(&db);
+        kg.add_triple("user", "uses", "vim", None, None, None)
+            .unwrap();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool("mempalace_recall", &json!({"query": "graphql unique"}))
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["success"], json!(true));
+        assert!(!v["memories"].as_array().unwrap().is_empty());
+        assert_eq!(v["profile"]["static"].as_array().unwrap().len(), 1);
+        assert_eq!(v["query"], "graphql unique");
+    }
+
+    #[test]
+    fn test_recall_respects_limit() {
+        let (_dir, db) = server_db();
+        db.add_drawer("w", "r1", "recalltoken one", None, "t", None)
+            .unwrap();
+        db.add_drawer("w", "r2", "recalltoken two", None, "t", None)
+            .unwrap();
+        db.add_drawer("w", "r3", "recalltoken three", None, "t", None)
+            .unwrap();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool(
+                "mempalace_recall",
+                &json!({"query": "recalltoken", "limit": 1}),
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["memories"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_recall_empty_query_errors() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        assert!(server
+            .execute_tool("mempalace_recall", &json!({"query": ""}))
+            .is_err());
+        assert!(server.execute_tool("mempalace_recall", &json!({})).is_err());
+    }
+
+    #[test]
+    fn test_recall_works_on_empty_palace() {
+        let (_dir, db) = server_db();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool("mempalace_recall", &json!({"query": "anything"}))
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["success"], json!(true));
+        assert!(v["memories"].as_array().unwrap().is_empty());
+        assert!(v["profile"]["static"].as_array().unwrap().is_empty());
+        assert!(v["profile"]["dynamic"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_tools_json_contains_verb_layer() {
+        assert!(TOOLS_JSON.contains("\"mempalace_memory\""));
+        assert!(TOOLS_JSON.contains("\"mempalace_recall\""));
+        assert!(TOOLS_JSON.contains(
+            "Call automatically whenever the user shares a durable fact, preference, or decision."
+        ));
+        assert!(TOOLS_JSON.contains(
+            "Search memory. Always call before answering questions about the user, past work, or prior decisions."
+        ));
     }
 }

@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `in_progress` |
-| Active phase | 24 |
-| Active task | 24.1 mempalace_memory |
-| Last completed task | 23.3 |
-| WIP notes | Phase 23 done. Continuing 24–25. |
+| Active phase | 25 |
+| Active task | 25.1–25.2 LoCoMo + contradiction annotation |
+| Last completed task | 24.3 |
+| WIP notes | Phase 24 done. Starting 25. |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 238 passed; clippy -D warnings clean (2026-08-21) |
+| Last verification | `cargo test --release` 250 passed; clippy -D warnings clean (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -870,13 +870,13 @@ Params: `action` enum `"save" | "forget"` (required), `content?`,
 - `forget`: requires `drawer_id`. Deletes via `delete_drawer`.
   Unknown id → `{success:false, error:"DrawerNotFound: ..."}`.
 
-- [ ] `test_memory_save_creates_drawer_with_defaults`
-- [ ] `test_memory_save_honors_wing_room_overrides`
-- [ ] `test_memory_save_honors_expires_at`
-- [ ] `test_memory_forget_deletes_drawer`
-- [ ] `test_memory_forget_unknown_id_errors`
-- [ ] `test_memory_save_without_content_errors`
-- [ ] `test_memory_invalid_action_errors`
+- [x] `test_memory_save_creates_drawer_with_defaults`
+- [x] `test_memory_save_honors_wing_room_overrides`
+- [x] `test_memory_save_honors_expires_at`
+- [x] `test_memory_forget_deletes_drawer`
+- [x] `test_memory_forget_unknown_id_errors`
+- [x] `test_memory_save_without_content_errors`
+- [x] `test_memory_invalid_action_errors`
 
 Tool description text must state: “Call automatically whenever the user
 shares a durable fact, preference, or decision.”
@@ -891,10 +891,10 @@ Response fuses hybrid search results with the Phase 23 profile:
   "profile": {...}, "query": "..." }
 ```
 
-- [ ] `test_recall_returns_memories_and_profile`
-- [ ] `test_recall_respects_limit`
-- [ ] `test_recall_empty_query_errors`
-- [ ] `test_recall_works_on_empty_palace` — memories [], profile empty
+- [x] `test_recall_returns_memories_and_profile`
+- [x] `test_recall_respects_limit`
+- [x] `test_recall_empty_query_errors`
+- [x] `test_recall_works_on_empty_palace` — memories [], profile empty
       sections, success true.
 
 Description text: “Search memory. Always call before answering questions
@@ -905,7 +905,7 @@ about the user, past work, or prior decisions.”
 README rewrite happens in Phase 21 style docs pass; here only add the
 two tools to TOOLS_JSON with teaching descriptions.
 
-- [ ] `test_tools_json_contains_verb_layer` — contains
+- [x] `test_tools_json_contains_verb_layer` — contains
       `"mempalace_memory"` and `"mempalace_recall"`.
 
 **Phase 24 done when:** 24.1–24.3 `[x]`, suite green. Total tool count
@@ -1006,6 +1006,12 @@ R@5 ≥ 94.04% floor holds; log both scores.
 - tests added: static/dynamic profile, expired exclusion, context limits/empty/unknown agent, MCP schema+roundtrip
 - suite: `cargo test --release` → 238 passed; clippy -D warnings clean
 - notes: new `src/profile.rs`; tools `mempalace_profile`, `mempalace_context`
+
+### 2026-08-21 — phase 24 — memory / recall verb layer
+
+- tests added: save defaults/overrides/expires, forget, invalid action, recall+profile, empty palace, TOOLS_JSON teaching copy
+- suite: `cargo test --release` → 250 passed; clippy -D warnings clean
+- notes: `mempalace_memory` + `mempalace_recall`; granular tools unchanged
 
 ## Parking lot
 

@@ -336,7 +336,7 @@ fn collect_assistant_text(conn: &Connection, session_id: &str, max_chars: usize)
     }
 }
 
-fn slugify(s: &str) -> String {
+pub(crate) fn slugify(s: &str) -> String {
     let slug: String = s
         .chars()
         .map(|c| match c {
