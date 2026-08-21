@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `in_progress` |
-| Active phase | 23 |
-| Active task | 23.1 profile computation |
-| Last completed task | 22.5 |
-| WIP notes | Phase 22 done. Continuing 23–25. |
+| Active phase | 24 |
+| Active task | 24.1 mempalace_memory |
+| Last completed task | 23.3 |
+| WIP notes | Phase 23 done. Continuing 24–25. |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 226 passed; clippy -D warnings clean (2026-08-21) |
+| Last verification | `cargo test --release` 238 passed; clippy -D warnings clean (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -793,19 +793,19 @@ we already store. No LLM, no new write path — pure composition.
 
 ### 23.1 Profile computation
 
-- [ ] `test_profile_static_from_open_triples` — add
+- [x] `test_profile_static_from_open_triples` — add
       `(user, prefers, dark mode)` and `(user, uses, vim)`; profile
       static contains both, ordered deterministically.
-- [ ] `test_profile_excludes_closed_facts` — invalidate one triple;
+- [x] `test_profile_excludes_closed_facts` — invalidate one triple;
       static shrinks accordingly.
-- [ ] `test_profile_dynamic_from_recent_matching_drawers` — three
+- [x] `test_profile_dynamic_from_recent_matching_drawers` — three
       drawers, two mention "alice"; dynamic lists those two, newest
       first, capped at limit.
-- [ ] `test_profile_dynamic_respects_limit` — limit 1 returns 1.
-- [ ] `test_profile_unknown_entity_returns_success_empty` — empty
+- [x] `test_profile_dynamic_respects_limit` — limit 1 returns 1.
+- [x] `test_profile_unknown_entity_returns_success_empty` — empty
       static/dynamic arrays, `success: true`. Never an error for
       unknown entities.
-- [ ] `test_profile_excludes_expired_drawers` — depends on Phase 22;
+- [x] `test_profile_excludes_expired_drawers` — depends on Phase 22;
       if 22 is not done yet, write the test behind the current schema
       (it will pass trivially) and keep it green after 22 lands.
 
@@ -817,9 +817,9 @@ Response: `{ success, entity, static: [{predicate, object,
 valid_from}...], dynamic: [{id, wing, room, filed_at, snippet}...] }`
 (snippet ≤200 chars).
 
-- [ ] `test_mcp_profile_schema_exists` — `TOOLS_JSON` contains
+- [x] `test_mcp_profile_schema_exists` — `TOOLS_JSON` contains
       `"mempalace_profile"` with required-shape params.
-- [ ] `test_mcp_profile_roundtrip` if `execute_tool` is drivable from
+- [x] `test_mcp_profile_roundtrip` if `execute_tool` is drivable from
       tests; otherwise db-level tests above plus the schema test.
 
 ### 23.3 `mempalace_context` composite tool
@@ -838,11 +838,11 @@ One call returning everything a session start needs:
 Params: `entity?`, `agent_name?`, `recent_limit?` (default 5),
 `diary_limit?` (default 3).
 
-- [ ] `test_context_includes_profile_recent_and_diary`
-- [ ] `test_context_respects_limits`
-- [ ] `test_context_empty_palace_succeeds` — all sections empty arrays,
+- [x] `test_context_includes_profile_recent_and_diary`
+- [x] `test_context_respects_limits`
+- [x] `test_context_empty_palace_succeeds` — all sections empty arrays,
       success true (fresh-palace first-call must not error).
-- [ ] `test_context_diary_absent_when_agent_unknown`
+- [x] `test_context_diary_absent_when_agent_unknown`
 
 Reuse `Database::search_recent` (or equivalent) for recent_drawers and
 the diary read path for diary_tail. No new tables.
@@ -1000,6 +1000,12 @@ R@5 ≥ 94.04% floor holds; log both scores.
 - tests added: migration, add_drawer TTL, search/list/taxonomy hide expired, include_expired, purge dry-run/commit
 - suite: `cargo test --release` → 226 passed; clippy -D warnings clean
 - notes: half-open `expires_at <= now`; `add_drawer_ex`; MCP `mempalace_purge_expired` dry-run default true; `InvalidExpiresAt` at MCP boundary
+
+### 2026-08-21 — phase 23 — profile + context
+
+- tests added: static/dynamic profile, expired exclusion, context limits/empty/unknown agent, MCP schema+roundtrip
+- suite: `cargo test --release` → 238 passed; clippy -D warnings clean
+- notes: new `src/profile.rs`; tools `mempalace_profile`, `mempalace_context`
 
 ## Parking lot
 

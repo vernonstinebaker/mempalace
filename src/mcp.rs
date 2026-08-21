@@ -8,6 +8,7 @@ use crate::hallways;
 use crate::import_sessions;
 use crate::indexer;
 use crate::knowledge_graph::KnowledgeGraph;
+use crate::profile;
 use crate::validate;
 use crate::wal;
 
@@ -72,6 +73,8 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_sync","description":"Prune drawers whose source_file no longer exists. Dry-run unless apply=true.","inputSchema":{"type":"object","properties":{"apply":{"type":"boolean","description":"Delete missing sources (default false)"},"wing":{"type":"string"},"project_dir":{"type":"string"}}}},"#,
     r#"{"name":"mempalace_mine","description":"Index a directory of text files into the palace. dry_run counts without writing.","inputSchema":{"type":"object","properties":{"source":{"type":"string","description":"Directory to index"},"wing":{"type":"string"},"limit":{"type":"integer","description":"Max files (0 = all)"},"dry_run":{"type":"boolean"}},"required":["source"]}},"#,
     r#"{"name":"mempalace_purge_expired","description":"Hard-delete drawers whose expires_at has passed. Dry-run by default.","inputSchema":{"type":"object","properties":{"dry_run":{"type":"boolean","description":"Default true \u2014 preview only"}}}},"#,
+    r#"{"name":"mempalace_profile","description":"Derived user/entity profile: open KG triples (static) plus recent matching drawers (dynamic). No LLM.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"KG subject / search term (default user)"},"dynamic_limit":{"type":"integer","description":"Max recent matching drawers (default 10, max 50)"}}}},"#,
+    r#"{"name":"mempalace_context","description":"One-call session start: profile + recent drawers + diary tail.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"Profile entity (default user)"},"agent_name":{"type":"string","description":"Diary agent (optional)"},"recent_limit":{"type":"integer","description":"Recent drawers (default 5)"},"diary_limit":{"type":"integer","description":"Diary entries (default 3)"}}}},"#,
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}},"#,
     r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable. Defaults to incremental (only new sessions). Use full=true to re-import all.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
@@ -202,7 +205,7 @@ impl<'a> Server<'a> {
         }
     }
 
-    fn execute_tool(&self, name: &str, args: &Value) -> anyhow::Result<String> {
+    pub(crate) fn execute_tool(&self, name: &str, args: &Value) -> anyhow::Result<String> {
         let kg = KnowledgeGraph::new(self.db);
 
         match name {
@@ -1006,6 +1009,24 @@ impl<'a> Server<'a> {
                 Ok(serde_json::to_string(&result)?)
             }
 
+            "mempalace_profile" => {
+                let entity = get_str(args, "entity").unwrap_or("user");
+                let dynamic_limit = get_i64(args, "dynamic_limit").unwrap_or(10) as usize;
+                let dynamic_limit = dynamic_limit.clamp(1, 50);
+                let result = profile::profile(self.db, entity, dynamic_limit)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
+            "mempalace_context" => {
+                let entity = get_str(args, "entity").unwrap_or("user");
+                let agent_name = get_str(args, "agent_name");
+                let recent_limit = get_i64(args, "recent_limit").unwrap_or(5) as usize;
+                let diary_limit = get_i64(args, "diary_limit").unwrap_or(3) as usize;
+                let result =
+                    profile::context(self.db, entity, agent_name, recent_limit, diary_limit)?;
+                Ok(serde_json::to_string(&result)?)
+            }
+
             _ => Err(anyhow::anyhow!("UnknownTool: {name}")),
         }
     }
@@ -1094,6 +1115,40 @@ mod tests {
         assert!(TOOLS_JSON.contains("mempalace_purge_expired"));
         assert!(TOOLS_JSON.contains("include_expired"));
         assert!(TOOLS_JSON.contains("expires_at"));
+        assert!(TOOLS_JSON.contains("mempalace_profile"));
+        assert!(TOOLS_JSON.contains("mempalace_context"));
+        assert!(TOOLS_JSON.contains("dynamic_limit"));
+    }
+
+    #[test]
+    fn test_mcp_profile_schema_exists() {
+        assert!(TOOLS_JSON.contains("\"mempalace_profile\""));
+        assert!(TOOLS_JSON.contains("dynamic_limit"));
+        assert!(TOOLS_JSON.contains("\"mempalace_context\""));
+    }
+
+    #[test]
+    fn test_mcp_profile_roundtrip() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let db = Database::open(dir.path().to_str().unwrap()).unwrap();
+        let kg = KnowledgeGraph::new(&db);
+        kg.add_triple("user", "uses", "vim", None, None, None)
+            .unwrap();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool("mempalace_profile", &json!({"entity": "user"}))
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["success"], json!(true));
+        assert_eq!(v["static"].as_array().unwrap().len(), 1);
+        let ctx_raw = server
+            .execute_tool("mempalace_context", &json!({"entity": "user"}))
+            .unwrap();
+        let ctx: Value = serde_json::from_str(&ctx_raw).unwrap();
+        assert_eq!(ctx["success"], json!(true));
+        assert!(ctx.get("profile").is_some());
+        assert!(ctx.get("recent_drawers").is_some());
+        assert!(ctx.get("diary_tail").is_some());
     }
 
     #[test]

@@ -8,6 +8,7 @@ mod knowledge_graph;
 mod lock;
 mod log;
 mod mcp;
+mod profile;
 mod validate;
 mod wal;
 
