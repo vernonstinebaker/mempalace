@@ -301,7 +301,7 @@ DEALINGS IN THE SOFTWARE.
 ## 🧪 Testing
 
 ```sh
-cargo test --release          # 255 tests as of v3.1.0 / PLAN phases 15–25
+cargo test --release          # 281 tests as of v3.1.0 / PLAN phases 15–27
 cargo fmt -- --check
 cargo clippy --release -- -D warnings
 python bench/locomo_rust.py   # synthetic LoCoMo harness (pass --data for official JSON)
