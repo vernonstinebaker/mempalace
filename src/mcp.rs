@@ -46,7 +46,7 @@ When WRITING AAAK: use entity codes, mark emotions, keep structure tight.";
 
 // ── Tools JSON ────────────────────────────────────────────────────────────────
 
-const TOOLS_JSON: &str = concat!(
+pub(crate) const TOOLS_JSON: &str = concat!(
     "[",
     r#"{"name":"mempalace_status","description":"Palace overview \u2014 total drawers, wing and room counts, vector health","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_list_wings","description":"List all wings with drawer counts","inputSchema":{"type":"object","properties":{}}},"#,
@@ -79,7 +79,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_recall","description":"Search memory. Always call before answering questions about the user, past work, or prior decisions.","inputSchema":{"type":"object","properties":{"query":{"type":"string"},"limit":{"type":"integer","description":"Max memories (default 5)"},"wing":{"type":"string"},"room":{"type":"string"}},"required":["query"]}},"#,
     r#"{"name":"mempalace_diary_write","description":"Write to your personal agent diary in AAAK format. Your observations, thoughts, what you worked on, what matters. Each agent has their own diary with full history. Write in AAAK for compression \u2014 e.g. 'SESSION:2026-04-04|built.palace.graph+diary.tools|ALC.req:agent.diaries.in.aaak|\u2605\u2605\u2605'. Use entity codes from the AAAK spec.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"entry":{"type":"string","description":"Your diary entry in AAAK format \u2014 compressed, entity-coded, emotion-marked"},"topic":{"type":"string","description":"Topic tag (optional, default: general)"}},"required":["agent_name","entry"]}},"#,
     r#"{"name":"mempalace_diary_read","description":"Read your recent diary entries (in AAAK). See what past versions of yourself recorded \u2014 your journal across sessions.","inputSchema":{"type":"object","properties":{"agent_name":{"type":"string","description":"Your name \u2014 each agent gets their own diary wing"},"last_n":{"type":"integer","description":"Number of recent entries to read (default: 10)"}},"required":["agent_name"]}},"#,
-    r#"{"name":"mempalace_import_sessions","description":"Import sessions from an opencode.db into the palace. Run this to sync recent session data into mempalace so it's searchable. Defaults to incremental (only new sessions). Use full=true to re-import all.","inputSchema":{"type":"object","properties":{"oc_db_path":{"type":"string","description":"Path to opencode.db (default: ~/.local/share/opencode/opencode.db)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
+    r#"{"name":"mempalace_import_sessions","description":"Import agent sessions into the palace so they become searchable memory. Sources: opencode, codex, grok (Grok Build), zcode. source=auto (default) imports from every store found on this machine; a specific name imports only that store. Defaults to incremental (only new/changed sessions); full=true re-imports all.","inputSchema":{"type":"object","properties":{"source":{"type":"string","enum":["auto","opencode","codex","grok","zcode"],"description":"Which session store to import (default: auto)"},"oc_db_path":{"type":"string","description":"Path override for opencode.db / zcode db (optional)"},"full":{"type":"boolean","description":"Re-import all sessions instead of incremental (default: false)"}}}},"#,
     r#"{"name":"mempalace_list_recent","description":"List recently filed content, ordered by filed_at descending. Use this when you need to know what's new.","inputSchema":{"type":"object","properties":{"limit":{"type":"integer","description":"Max results (default 20)"},"wing":{"type":"string","description":"Filter by wing (optional)"},"since":{"type":"string","description":"Only entries filed after this ISO datetime"}}}},"#,
     r#"{"name":"mempalace_export","description":"Export drawers as JSON Lines. Filter by wing and/or room.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"}}}},"#,
     r#"{"name":"mempalace_export_kg","description":"Export knowledge graph triples as JSON.","inputSchema":{"type":"object","properties":{}}},"#,
@@ -663,20 +663,48 @@ impl<'a> Server<'a> {
 
             // ── mempalace_import_sessions ─────────────────────────────────────
             "mempalace_import_sessions" => {
-                let oc_db_path = get_str(args, "oc_db_path").unwrap_or("");
+                let source = get_str(args, "source").unwrap_or("auto");
                 let full = args.get("full").and_then(|v| v.as_bool()).unwrap_or(false);
-                let path = if oc_db_path.is_empty() {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    format!("{home}/.local/share/opencode/opencode.db")
-                } else {
-                    oc_db_path.to_string()
+                let paths = import_sessions::SourcePaths::resolve();
+                // Legacy path override: oc_db_path overrides opencode (and zcode) db location.
+                let paths = match get_str(args, "oc_db_path") {
+                    Some(p) if !p.is_empty() => import_sessions::SourcePaths {
+                        opencode_db: std::path::PathBuf::from(p),
+                        zcode_db: std::path::PathBuf::from(p),
+                        ..paths
+                    },
+                    _ => paths,
                 };
-                let count =
-                    import_sessions::import_sessions(self.db, &path, self.embedder.as_ref(), full)?;
-                Ok(serde_json::to_string(&json!({
-                    "success": true,
-                    "imported": count,
-                }))?)
+
+                if source == "auto" {
+                    let results = import_sessions::import_auto(
+                        self.db,
+                        &paths,
+                        self.embedder.as_ref(),
+                        full,
+                    )?;
+                    let mut sources = serde_json::Map::new();
+                    for (name, n) in results {
+                        sources.insert(name, json!({ "imported": n }));
+                    }
+                    Ok(serde_json::to_string(&json!({
+                        "success": true,
+                        "sources": sources,
+                    }))?)
+                } else {
+                    let (name, count) = import_sessions::import_one(
+                        self.db,
+                        source,
+                        &paths,
+                        self.embedder.as_ref(),
+                        full,
+                    )?;
+                    Ok(serde_json::to_string(&json!({
+                        "success": true,
+                        "source": name,
+                        "imported": count,
+                    }))?)
+                }
             }
 
             // ── mempalace_list_recent ─────────────────────────────────────────

@@ -78,17 +78,31 @@ mempalace import-palace /path/to/old/palace.db
 ```
 Migrates drawers and triples from any compatible MemPalace SQLite database (original Python or Rust version).
 
-### ✅ Import OpenCode Sessions
+### ✅ Import Agent Sessions (OpenCode, Codex, Grok Build, Zcode)
 ```sh
-mempalace index-sessions          # uses default ~/.local/share/opencode/opencode.db
-mempalace index-sessions --db /custom/path/to/opencode.db
+mempalace index-sessions                    # auto: import from every store found
+mempalace index-sessions --source codex     # only one source
+mempalace index-sessions --db /custom/path/to/opencode.db   # path override (opencode/zcode)
 ```
-Each session becomes one drawer:
-- `wing=opencode`
-- `room=slugified session title`
-- Content = title + directory + recent assistant text (first/last 1000 chars)
-- Stable ID: `oc_session_{session_id}` enables safe re-indexing
-- Automatic deduplication on re-run
+Sources and their default locations (env-overridable via `MEMPALACE_OPENCODE_DB`,
+`MEMPALACE_CODEX_HOME`, `MEMPALACE_GROK_HOME`, `MEMPALACE_ZCODE_DB`):
+
+| Source | Store | Wing / stable ID |
+|--------|-------|------------------|
+| OpenCode | `~/.local/share/opencode/opencode.db` | `opencode` / `oc_session_{id}` |
+| Codex | `~/.codex/sessions/**/*.jsonl` + `session_index.jsonl` | `codex` / `codex_{id}` |
+| Grok Build | `~/.grok/sessions/<cwd>/<uuid>/` | `grok` / `grok_{id}` |
+| Zcode | `~/.zcode/cli/db/db.sqlite` | `zcode` / `zc_{id}` |
+
+Behavior:
+- Auto mode silently skips stores that don't exist; explicitly naming a missing
+  store returns `SourceNotFound`.
+- Incremental by default (`sync_state` per source); `--full` re-imports everything.
+- System/developer prompt boilerplate is never imported.
+- Foreign databases are opened read-only.
+- Each session becomes one drawer: room = slugified title, content = title +
+  date + directory + first user message + assistant text (head/tail bounded).
+- Automatic deduplication on re-run (byte-identical content is skipped).
 
 ### ✅ Bulk Import with Filtering
 ```sh
@@ -236,7 +250,7 @@ MEMPALACE_PALACE_PATH=~/mempalace mempalace-mcp
 # Import existing palace (original Python or Rust version)
 mempalace import-palace /path/to/old/palace.db
 
-# Import OpenCode sessions
+# Import agent sessions (auto-discovers OpenCode/Codex/Grok/Zcode)
 mempalace index-sessions
 
 # Index source code with whitelist

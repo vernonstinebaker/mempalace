@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `done` |
-| Active phase | 25 |
+| Active phase | *(none — 15–26 complete)* |
 | Active task | *(done)* |
-| Last completed task | 15.8 / 25 LME re-run |
-| WIP notes | Phases 15–25 complete. User-turns LME R@5 **96.81%** (455/470) on 2026-08-21; floor 94.04% and stretch 96.6% both held. Dataset stays out of git (`/tmp/longmemeval-data/longmemeval_s_cleaned.json`). |
+| Last completed task | 26.6 |
+| WIP notes | Phase 26 (multi-source session import: OpenCode, Codex, Grok Build, Zcode) complete. Antigravity parked (server-side conversations). Next work requires a new phase decision. |
 | Files currently dirty | — |
-| Last verification | LME user-turns R@5 96.81% (455/470, 882s); `cargo test --release` 255 passed; clippy clean; LoCoMo synthetic n=2 R@5=100% |
+| Last verification | `cargo test --release` 276 passed · `cargo fmt -- --check` clean · `cargo clippy --release -- -D warnings` clean (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -973,6 +973,133 @@ R@5 ≥ 94.04% floor holds; log both scores.
 
 ---
 
+## Phase 26 — Multi-source session import (Codex, Grok Build, Zcode)
+
+**Goal:** One import surface for every local agent-session store, so
+users stop juggling per-tool exports. Extends the existing OpenCode
+importer to three more sources behind a normalized pipeline.
+
+**Recon findings (verified on this machine, 2026-08-21):**
+
+| Source | Store | Format |
+|--------|-------|--------|
+| OpenCode | `~/.local/share/opencode/opencode.db` | SQLite `session` + message tables (existing importer) |
+| Codex | `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | JSONL: line 1 `session_meta` payload (`id`, `cwd`, `timestamp`); then `response_item` payloads with `role: user\|assistant` and `content[].text`. Titles + `updated_at` from `~/.codex/session_index.jsonl` (`{id, thread_name, updated_at}`) |
+| Grok Build | `~/.grok/sessions/<url-encoded-cwd>/<uuid>/` | Per-session dir: `summary.json` (`info.id`, `info.cwd`, `created_at`, `updated_at`, `agent_name`) + `chat_history.jsonl` (`{type: system\|user\|assistant, content: string \| [{type:"text",text}]}`) |
+| Zcode | `~/.zcode/cli/db/db.sqlite` | SQLite `session` (`id`, `title`, `directory`, `slug`, epoch `time_created`/`time_updated`) + `message` (`session_id`, `data` JSON text, `sequence`) — near-clone of the OpenCode schema |
+
+**Antigravity (agy): NOT importable today** — conversations are
+server-synced; local disk holds only IDE UI state (verified: global +
+workspace `state.vscdb` contain no transcript keys; `shared_proto_db` is
+window metadata). Parked below; revisit if Google ships local export.
+
+**Files:** refactor `src/import_sessions.rs` → shared pipeline + per-source
+adapters (new `src/import_sources/` module or sibling fns — implementer's
+choice, keep it small), `src/mcp.rs`, `src/main.rs`.
+
+**Design invariants:**
+- Normalized intermediate: `{ id, title, directory, updated_at_ms, content }`
+  per session; one shared write path does dedup/upsert/embed/sync_state.
+- Stable drawer IDs (dedup on re-import): keep `oc_session_{id}`;
+  new: `codex_{id}`, `grok_{id}`, `zc_{id}`.
+- Wings: `opencode` (unchanged), `codex`, `grok`, `zcode`.
+- sync_state keys: `opencode_sessions` (unchanged), `codex_sessions`,
+  `grok_sessions`, `zcode_sessions`.
+- Path overrides via env: `MEMPALACE_CODEX_HOME` (default `~/.codex`),
+  `MEMPALACE_GROK_HOME` (default `~/.grok`),
+  `MEMPALACE_ZCODE_DB` (default `~/.zcode/cli/db/db.sqlite`);
+  existing opencode default unchanged.
+- Missing store = skipped silently in `auto` mode (not an error);
+  explicitly requested missing store = `SourceNotFound` error.
+- Never import `system` role content (prompt boilerplate pollution —
+  same rationale as the 15.1 sanitizer).
+
+### 26.1 Extract shared import pipeline
+
+Refactor the OpenCode path so session→drawer writing (dedup check,
+`add_drawer_ex`, diary-free, sync_state update) is one function taking
+normalized sessions. **No behavior change.**
+
+- [x] All existing `import_sessions` tests pass unmodified (regression gate).
+- [x] `test_import_pipeline_dedups_by_stable_id`
+- [x] `test_import_pipeline_updates_sync_state_to_max_ts`
+
+### 26.2 Codex adapter
+
+- [x] `test_codex_parse_rollout_yields_session` — fixture JSONL with
+      `session_meta` + user/assistant `response_item`s → normalized
+      session with title from index, cwd as directory.
+- [x] `test_codex_skips_malformed_lines` — invalid JSON / unknown
+      payload types ignored, import continues.
+- [x] `test_codex_developer_role_excluded` — `role: developer` /
+      `system` lines never reach content.
+- [x] `test_codex_incremental_sync_uses_index_updated_at` — second run
+      with a newer `session_index.jsonl` entry imports only that one.
+- [x] `test_codex_stable_id_dedup` — re-import same rollout → 0 added.
+
+Fixtures built inline in tests (write temp JSONL files); no vendored
+real transcripts.
+
+### 26.3 Grok Build adapter
+
+- [x] `test_grok_parse_summary_and_chat_history` — temp session dir →
+      normalized session; title fallback `session-{uuid8}` when summary
+      empty (mirrors OpenCode behavior).
+- [x] `test_grok_handles_string_and_array_content` — both
+      `"content": "..."` and `[{"type":"text","text":...}]` forms parse.
+- [x] `test_grok_system_role_excluded`
+- [x] `test_grok_skips_zero_message_sessions` — `num_chat_messages: 0`
+      dirs produce no drawer.
+- [x] `test_grok_stable_id_dedup`
+
+Walk order deterministic (sort by uuid) for stable sync behavior.
+
+### 26.4 Zcode adapter
+
+- [x] `test_zcode_parse_sessions_from_sqlite` — build a temp SQLite
+      with the `session`/`message` schema (CREATE TABLE statements from
+      recon), import, assert drawers.
+- [x] `test_zcode_message_data_json_extraction` — `data` column is JSON;
+      extract text parts only.
+- [x] `test_zcode_incremental_sync` — `time_updated` epoch cutoff works.
+- [x] `test_zcode_stable_id_dedup`
+
+Open the source DB read-only (`Connection::open_with_flags`) — never
+mutate another tool's database.
+
+### 26.5 MCP surface
+
+`mempalace_import_sessions` gains optional `source`:
+`"auto"` (default) imports from every store that exists and returns
+per-source counts:
+
+```json
+{ "success": true,
+  "sources": { "opencode": {"imported": N}, "codex": {...},
+               "grok": {...}, "zcode": {...} } }
+```
+
+- [x] `test_mcp_import_source_param_routes` — each explicit value hits
+      its adapter (drive via fixture env paths).
+- [x] `test_mcp_import_auto_skips_missing_stores` — env points at
+      nonexistent homes → success with empty/absent sources, no error.
+- [x] `test_mcp_import_explicit_missing_store_errors` —
+      `source="codex"` with no codex home → `SourceNotFound`.
+- [x] `test_tools_json_import_sessions_documents_sources`
+
+### 26.6 CLI parity
+
+`index-sessions [--source auto|opencode|codex|grok|zcode] [--full]`
+(existing `--db` kept as alias for zcode/opencode path override).
+
+- [x] `test_cli_index_sessions_source_flag` — arg parsing unit test.
+
+**Phase 26 done when:** 26.1–26.6 `[x]`, suite green, fmt/clippy clean,
+README tool/import docs updated in the same change. No search-ranking
+changes → no benchmark re-run required.
+
+---
+
 ## Parking lot
 
 Not scheduled. Promote into a numbered phase only by editing this file
@@ -991,6 +1118,7 @@ and the Resume table.
 | `list_agents` | Thin alias over wings named `wing_agent_*` — add if users ask |
 | Performance p99 < 100ms @ 100k | Needs a 100k fixture; do after 21.4 has a measurement harness |
 | Chunking large sources (`parent_drawer_id` child drawers) | Supermemory-style; schema + ranking changes, must be benchmark-gated via the Phase 25 harnesses first. Promote only with LME + LoCoMo before/after numbers |
+| Antigravity (agy) session import | Conversations are server-synced; local disk has only IDE UI state (verified 2026-08-21: no transcript keys in global/workspace `state.vscdb`, `shared_proto_db` is window metadata). Revisit if Google ships a local export or documented store format |
 
 ---
 
@@ -1133,3 +1261,13 @@ Format:
 - by type: knowledge-update 72/72 (1.000); multi-session 118/121 (0.975); single-session-assistant 53/56 (0.946); single-session-preference 27/30 (0.900); single-session-user 64/64 (1.000); temporal-reasoning 121/127 (0.953)
 - all-turns harness not re-run (not required for 15.8 / 25 close)
 - phase 25 complete; PLAN status → `done`
+
+### 2026-08-21 — phase 26 — multi-source session import
+
+- tests added: shared pipeline dedup/sync-state (2), codex parse/malformed/developer-excluded/incremental/dedup (5), grok parse/content-forms/system-excluded/zero-msg/dedup (5), zcode sqlite/json-extraction/incremental/dedup (4), routing auto/explicit/schema (3), CLI source flag (1); existing import tests pass unmodified
+- suite: `cargo test --release` → 276 passed; `cargo fmt -- --check` clean; `cargo clippy --release -- -D warnings` clean
+- tools changed: `mempalace_import_sessions` gains `source` enum (`auto`|`opencode`|`codex`|`grok`|`zcode`) + per-source counts; TOOLS_JSON updated; CLI `index-sessions --source`
+- design: normalized `RawSession` pipeline (`import_raw_sessions`), stable IDs `codex_{id}` / `grok_{id}` / `zc_{id}`, sync_state keys per source, read-only opens of foreign DBs, system/developer roles never imported, env overrides `MEMPALACE_CODEX_HOME` / `MEMPALACE_GROK_HOME` / `MEMPALACE_ZCODE_DB` / `MEMPALACE_OPENCODE_DB`
+- antigravity: parked — conversations are server-synced, no local transcript store (verified on disk)
+- no search-ranking changes → no benchmark re-run required
+- phase 26 complete; PLAN status → `done`

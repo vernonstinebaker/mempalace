@@ -184,6 +184,19 @@ impl Database {
 
     // ── sync state ────────────────────────────────────────────────────────────
 
+    /// Get the stored content of a drawer by id, or None if absent.
+    /// Used by importers to skip re-upserting byte-identical sessions.
+    pub fn get_drawer_content(&self, id: &str) -> Result<Option<String>> {
+        Ok(self
+            .conn
+            .query_row(
+                "SELECT content FROM drawers WHERE id = ?1",
+                params![id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?)
+    }
+
     /// Get the last imported timestamp for a sync source.
     /// Returns 0 if never imported.
     pub fn get_sync_state(&self, source: &str) -> i64 {
