@@ -22,13 +22,13 @@ Progress log, and git status — not chat history.
 
 | Field | Value |
 |-------|-------|
-| Status | `phase_complete` |
-| Active phase | 19 |
-| Active task | 19.1 |
-| Last completed task | 18.4 |
+| Status | `done` |
+| Active phase | 21 |
+| Active task | *(done)* |
+| Last completed task | 21.3 |
 | WIP notes | — |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 201 passed (2026-08-21) |
+| Last verification | `cargo test --release` 211 passed; clippy -D warnings clean; v3.1.0 (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -557,26 +557,26 @@ indexer can use mtime.
 `authored_at DATETIME` on `drawers`. Existing rows: `UPDATE drawers SET
 authored_at = filed_at WHERE authored_at IS NULL`.
 
-- [ ] `test_open_backfills_authored_at_from_filed_at`
-- [ ] `test_add_drawer_accepts_authored_at_override`
+- [x] `test_open_backfills_authored_at_from_filed_at`
+- [x] `test_add_drawer_accepts_authored_at_override`
 
 Extend `add_drawer` / `upsert_drawer` with `authored_at: Option<&str>`.
 Default: now (same as `filed_at`).
 
 ### 19.2 Import + indexer wire-up
 
-- [ ] Session import: set `authored_at` from session `time_updated`
+- [x] Session import: set `authored_at` from session `time_updated`
       (already used for `filed_at` — keep both, same value is fine).
       Test: `test_import_sessions_sets_authored_at` in
       `import_sessions.rs`.
-- [ ] Indexer: `authored_at` from file mtime (UTC ISO).
+- [x] Indexer: `authored_at` from file mtime (UTC ISO).
       `test_index_file_sets_authored_at_from_mtime`.
 
 ### 19.3 Search + list_drawers
 
-- [ ] Hybrid tie-break (15.7) should prefer `authored_at` then `filed_at`.
+- [x] Hybrid tie-break (15.7) should prefer `authored_at` then `filed_at`.
       `test_equal_score_prefers_authored_at_over_filed_at`
-- [ ] `list_drawers`: optional `since`, `before` on `filed_at`
+- [x] `list_drawers`: optional `since`, `before` on `filed_at`
       (inclusive `since`, exclusive `before` — Python). MCP schema.
       `test_list_drawers_since_before`
 
@@ -601,8 +601,8 @@ busy/locked.
 Use it on write paths that currently `execute` once: `add_drawer`,
 `delete_drawer`, `update_drawer`, `kg` writes.
 
-- [ ] `test_busy_timeout_is_set` — `PRAGMA busy_timeout` reads 5000
-- [ ] `test_with_busy_retry_retries_on_busy` — inject a stub or a
+- [x] `test_busy_timeout_is_set` — `PRAGMA busy_timeout` reads 5000
+- [x] `test_with_busy_retry_retries_on_busy` — inject a stub or a
       second connection holding a BEGIN EXCLUSIVE; assert the write
       eventually succeeds or returns a mapped `Busy` error after retries
       (either is acceptable if documented in the test).
@@ -621,10 +621,10 @@ Reads still allowed.
 
 Stale lock (PID dead): steal after liveness check (`kill(pid, 0)`).
 
-- [ ] `test_second_writer_refused` (two `Database::open` in one process
+- [x] `test_second_writer_refused` (two `Database::open` in one process
       may share — test with a lock guard type instead:
       `WriteGuard::try_acquire(dir)` twice → second fails)
-- [ ] `test_stale_lock_stolen_when_pid_dead` — write a lock file with
+- [x] `test_stale_lock_stolen_when_pid_dead` — write a lock file with
       pid 1_000_000 or a definitely-dead pid
 
 **Dependency rule:** if this requires `fs2` or `nix`, add them as
@@ -633,7 +633,7 @@ package). Prefer no extra crate.
 
 ### 20.3 Concurrent mixed-ops test (unfinished ROADMAP 7.2)
 
-- [ ] `test_concurrent_mixed_ops` — 8 threads, 50 ops each, mix
+- [x] `test_concurrent_mixed_ops` — 8 threads, 50 ops each, mix
       search / add_drawer / delete on one palace dir. Use
       `Arc<Mutex<Database>>` **or** reopen per thread (SQLite full mutex).
       Assert no panic, drawer count consistent, `PRAGMA quick_check` ok.
@@ -653,31 +653,31 @@ Do this **after** 15–20 so the README matches reality.
 
 ### 21.1 README truth
 
-- [ ] Tool count: actual number in `TOOLS_JSON` (count after 15–20;
+- [x] Tool count: actual number in `TOOLS_JSON` (count after 15–20;
       expected ~43: +supersede, checkpoint, delete_by_source, sync, mine,
       list_hallways, delete_hallway)
-- [ ] Test count: `rg -c '#\[test\]' src`
-- [ ] Benchmark table: Phase 15 scores; drop the outdated “21 tools” /
+- [x] Test count: `rg -c '#\[test\]' src`
+- [x] Benchmark table: Phase 15 scores; drop the outdated “21 tools” /
       “107 tests”; keep the hybrid_v4-was-rigged note **only if** we still
       refuse question-ID hacks
-- [ ] Architecture tree: mention `validate.rs`, `wal.rs`, `hallways` if added
-- [ ] Version in `--info` (`main.rs` currently hardcodes `v3.0.0`) must
+- [x] Architecture tree: mention `validate.rs`, `wal.rs`, `hallways` if added
+- [x] Version in `--info` (`main.rs` currently hardcodes `v3.0.0`) must
       match `Cargo.toml`
 
 ### 21.2 Clippy + fmt gate
 
-- [ ] `cargo fmt -- --check` clean
-- [ ] `cargo clippy -- -D warnings` clean
-- [ ] Fix all warnings; do not `#[allow]` whole modules
+- [x] `cargo fmt -- --check` clean
+- [x] `cargo clippy -- -D warnings` clean
+- [x] Fix all warnings; do not `#[allow]` whole modules
 
 ### 21.3 Version bump **3.1.0**
 
 Backward-compatible MCP additions (new tools, new optional fields).
 Not 4.0.0 — no on-disk break if migrations are additive.
 
-- [ ] `Cargo.toml` version `3.1.0`
-- [ ] `main.rs` `--info` string
-- [ ] `cargo test --release`
+- [x] `Cargo.toml` version `3.1.0`
+- [x] `main.rs` `--info` string
+- [x] `cargo test --release`
 
 ### 21.4 Optional micro-benches (ROADMAP 7.1 lite)
 
@@ -685,7 +685,7 @@ Do **not** add criterion unless needed. A `#[cfg(test)]` ignored bench
 or `bench/` Python already exists. If you add Rust benches, use
 `#[ignore]` tests that print timings:
 
-- [ ] `#[ignore] bench_search_hybrid_1000` — 1000 drawers, search p99
+- [x] `#[ignore] bench_search_hybrid_1000` — 1000 drawers, search p99
       printed; no hard assert unless you measure a local baseline first
 
 **Phase 21 done when:** README matches the binary, clippy `-D warnings`
@@ -987,6 +987,13 @@ R@5 ≥ 94.04% floor holds; log both scores.
 
 - tests added: extract urls/paths/idents, hallway CRUD, auto-tunnels
 - suite: `cargo test --release` → 201 passed
+
+
+### 2026-08-21 — tasks 19–21 — authored_at, durability, 3.1.0
+
+- tests added: authored_at backfill/override/tie-break, list since/before, busy_timeout, busy retry, concurrent mixed ops, writer lock
+- suite: 211 passed; `cargo clippy --release -- -D warnings` clean; version 3.1.0
+- notes: flock on palace.write.lock; libc compile-time dep only
 
 ## Parking lot
 

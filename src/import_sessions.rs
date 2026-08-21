@@ -120,7 +120,7 @@ pub fn import_sessions(
             slugify(&session.title)
         };
 
-        let drawer_id = format!("oc_session_{}", &session.id);
+        let drawer_id = format!("oc_session_{}", session.id);
         match db.upsert_drawer(
             &drawer_id,
             "opencode",

@@ -5,6 +5,7 @@ mod import_palace;
 mod import_sessions;
 mod indexer;
 mod knowledge_graph;
+mod lock;
 mod log;
 mod mcp;
 mod validate;
@@ -50,7 +51,7 @@ fn main() {
             let dir = get_palace_dir();
             let db = db::Database::open(&dir).expect("Failed to open database");
             let count = db.get_drawer_count();
-            println!("MemPalace v3.0.0 (Rust)");
+            println!("MemPalace v3.1.0 (Rust)");
             println!("Palace dir: {dir}");
             println!("Total drawers: {count}");
         }

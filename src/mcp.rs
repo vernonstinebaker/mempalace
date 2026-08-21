@@ -87,7 +87,7 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_delete_tunnel","description":"Delete an explicit cross-wing tunnel by ID.","inputSchema":{"type":"object","properties":{"tunnel_id":{"type":"string","description":"Tunnel ID to delete"}},"required":["tunnel_id"]}},"#,
     r#"{"name":"mempalace_follow_tunnels","description":"Follow explicit tunnels from a wing/room to see connected ideas in other wings.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Wing name"},"room":{"type":"string","description":"Room name"}},"required":["wing","room"]}},"#,
     r#"{"name":"mempalace_get_drawer","description":"Fetch a single drawer by ID with full content and metadata.","inputSchema":{"type":"object","properties":{"drawer_id":{"type":"string","description":"ID of the drawer to fetch"}},"required":["drawer_id"]}},"#,
-    r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"}}}},"#,
+    r#"{"name":"mempalace_list_drawers","description":"Paginated drawer listing with wing/room filters. Returns content previews (first 200 chars) with total count.","inputSchema":{"type":"object","properties":{"wing":{"type":"string","description":"Filter by wing (optional)"},"room":{"type":"string","description":"Filter by room (optional)"},"limit":{"type":"integer","description":"Max results (default 20, max 100)"},"offset":{"type":"integer","description":"Offset for pagination (default 0)"},"since":{"type":"string","description":"Only drawers filed at or after this ISO datetime"},"before":{"type":"string","description":"Only drawers filed before this ISO datetime"}}}},"#,
     r#"{"name":"mempalace_integrity","description":"Run integrity checks across all indices (FTS, vectors, triples, tunnels). Returns health report with any issues found.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_list_hallways","description":"List structural hallways (entity co-occurrence graph) optionally filtered by wing.","inputSchema":{"type":"object","properties":{"wing":{"type":"string"}}}},"#,
     r#"{"name":"mempalace_delete_hallway","description":"Delete a hallway by ID.","inputSchema":{"type":"object","properties":{"hallway_id":{"type":"string"}},"required":["hallway_id"]}}"#,
@@ -846,7 +846,11 @@ impl<'a> Server<'a> {
                 let limit = get_i64(args, "limit").unwrap_or(20) as usize;
                 let limit = limit.clamp(1, 100);
                 let offset = get_i64(args, "offset").unwrap_or(0) as usize;
-                let result = self.db.list_drawers(wing, room, limit, offset)?;
+                let since = validate::sanitize_iso_date(get_str(args, "since"))?;
+                let before = validate::sanitize_iso_date(get_str(args, "before"))?;
+                let result = self
+                    .db
+                    .list_drawers_range(wing, room, limit, offset, since, before)?;
                 Ok(serde_json::to_string(&result)?)
             }
 

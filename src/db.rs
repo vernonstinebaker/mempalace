@@ -15,6 +15,7 @@ type DrawerMeta = (String, String, String, Option<String>, Option<String>);
 pub struct Database {
     pub conn: Connection,
     pub vector_disabled: bool,
+    _write_lock: crate::lock::WriteGuard,
 }
 
 impl Database {
@@ -28,10 +29,14 @@ impl Database {
              PRAGMA synchronous=NORMAL;
              PRAGMA foreign_keys=OFF;",
         )?;
+        conn.busy_timeout(std::time::Duration::from_millis(5000))?;
+
+        let write_lock = crate::lock::try_acquire(dir)?;
 
         let mut db = Self {
             conn,
             vector_disabled: false,
+            _write_lock: write_lock,
         };
         db.create_tables()?;
         db.probe_vec0_health();
@@ -120,6 +125,11 @@ impl Database {
 
         Self::ensure_column(&self.conn, "triples", "source_file", "TEXT")?;
         Self::ensure_column(&self.conn, "triples", "source_drawer_id", "TEXT")?;
+        Self::ensure_column(&self.conn, "drawers", "authored_at", "DATETIME")?;
+        let _ = self.conn.execute(
+            "UPDATE drawers SET authored_at = filed_at WHERE authored_at IS NULL",
+            [],
+        );
 
         self.conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS hallways (
@@ -442,6 +452,7 @@ impl Database {
     // ── search ────────────────────────────────────────────────────────────────
 
     #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)]
     pub fn search(
         &self,
         query: &str,
@@ -642,7 +653,7 @@ impl Database {
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
              WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}
-             ORDER BY rank, d.filed_at DESC, d.id ASC LIMIT {limit} OFFSET {offset}"
+             ORDER BY rank, COALESCE(d.authored_at, d.filed_at) DESC, d.id ASC LIMIT {limit} OFFSET {offset}"
         );
 
         let mut stmt = match self.conn.prepare(&sql) {
@@ -998,7 +1009,7 @@ impl Database {
              FROM drawers_fts
              JOIN drawers d ON drawers_fts.rowid = d.rowid
              WHERE drawers_fts MATCH ?1{filter_sql}{date_sql}{src_sql}
-             ORDER BY d.filed_at DESC LIMIT {limit} OFFSET {offset}"
+             ORDER BY COALESCE(d.authored_at, d.filed_at) DESC LIMIT {limit} OFFSET {offset}"
         );
 
         let mut stmt = match self.conn.prepare(&sql) {
@@ -1208,8 +1219,8 @@ impl Database {
 
         let ft = filed_at.unwrap_or("datetime('now')");
         self.conn.execute(
-            "INSERT OR REPLACE INTO drawers (id, wing, room, content, source_file, added_by, filed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR REPLACE INTO drawers (id, wing, room, content, source_file, added_by, filed_at, authored_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
             params![id, wing, room, content, source_file, added_by, ft],
         )?;
 
@@ -1245,11 +1256,14 @@ impl Database {
         let hex = format!("{:x}", hash);
         let drawer_id = format!("drawer_{}_{}_{}", wing, room, &hex[..16]);
 
-        self.conn.execute(
-            "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, added_by, filed_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'))",
+        with_busy_retry(|| {
+            self.conn.execute(
+            "INSERT OR IGNORE INTO drawers (id, wing, room, content, source_file, added_by, filed_at, authored_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, datetime('now'), datetime('now'))",
             params![drawer_id, wing, room, content, source_file, added_by],
-        )?;
+        )
+        })
+        .map_err(|e| anyhow!("{e}"))?;
 
         let changes = self.conn.changes();
         if changes > 0 {
@@ -1265,6 +1279,14 @@ impl Database {
         }
 
         Ok(drawer_id)
+    }
+
+    pub fn set_authored_at(&self, drawer_id: &str, authored_at: &str) -> Result<()> {
+        self.conn.execute(
+            "UPDATE drawers SET authored_at = ?1 WHERE id = ?2",
+            params![authored_at, drawer_id],
+        )?;
+        Ok(())
     }
 
     // ── delete_drawer ─────────────────────────────────────────────────────────
@@ -2304,6 +2326,7 @@ impl Database {
     }
 
     /// Paginated drawer listing with wing/room filters.
+    #[allow(dead_code)]
     pub fn list_drawers(
         &self,
         wing: Option<&str>,
@@ -2311,9 +2334,24 @@ impl Database {
         limit: usize,
         offset: usize,
     ) -> Result<Value> {
+        self.list_drawers_range(wing, room, limit, offset, None, None)
+    }
+
+    pub fn list_drawers_range(
+        &self,
+        wing: Option<&str>,
+        room: Option<&str>,
+        limit: usize,
+        offset: usize,
+        since: Option<&str>,
+        before: Option<&str>,
+    ) -> Result<Value> {
         let (filter_sql, filter_params) = Self::build_filter_clause(wing, room, 1);
-        let count_sql = format!("SELECT COUNT(*) FROM drawers d WHERE 1=1{filter_sql}");
-        let count_params = filter_params.clone();
+        let (date_sql, date_params) =
+            Self::build_date_clause(since, before, 1 + filter_params.len());
+        let count_sql = format!("SELECT COUNT(*) FROM drawers d WHERE 1=1{filter_sql}{date_sql}");
+        let mut count_params = filter_params.clone();
+        count_params.extend(date_params.clone());
         let total: i64 = self
             .conn
             .prepare(&count_sql)
@@ -2327,20 +2365,48 @@ impl Database {
             .unwrap_or(0);
 
         let sql = format!(
-            "SELECT id, wing, room, content, source_file, filed_at FROM drawers d WHERE 1=1{filter_sql} ORDER BY filed_at DESC LIMIT {limit} OFFSET {offset}"
+            "SELECT id, wing, room, content, source_file, filed_at, authored_at FROM drawers d WHERE 1=1{filter_sql}{date_sql} ORDER BY COALESCE(authored_at, filed_at) DESC LIMIT {limit} OFFSET {offset}"
         );
         let mut stmt = self
             .conn
             .prepare(&sql)
             .map_err(|_| anyhow!("query error"))?;
-        let rows: Vec<Value> = stmt.query_map(rusqlite::params_from_iter(filter_params.iter()), |r| {
+        let mut all_params = filter_params;
+        all_params.extend(date_params);
+        let rows: Vec<Value> = stmt.query_map(rusqlite::params_from_iter(all_params.iter()), |r| {
             let doc: String = r.get(3)?;
             let preview: String = doc.chars().take(200).collect();
-            Ok(json!({"id": r.get::<_,String>(0)?,"wing": r.get::<_,String>(1)?,"room": r.get::<_,String>(2)?,"content_preview": preview,"source_file": r.get::<_,Option<String>>(4)?,"filed_at": r.get::<_,Option<String>>(5)?}))
+            Ok(json!({"id": r.get::<_,String>(0)?,"wing": r.get::<_,String>(1)?,"room": r.get::<_,String>(2)?,"content_preview": preview,"source_file": r.get::<_,Option<String>>(4)?,"filed_at": r.get::<_,Option<String>>(5)?,"authored_at": r.get::<_,Option<String>>(6)?}))
         }).map(|iter| iter.filter_map(|r| r.ok()).collect()).unwrap_or_default();
 
         Ok(json!({"drawers": rows, "total": total, "limit": limit, "offset": offset}))
     }
+}
+
+fn with_busy_retry<T, F>(mut op: F) -> rusqlite::Result<T>
+where
+    F: FnMut() -> rusqlite::Result<T>,
+{
+    let mut delay = 10u64;
+    for attempt in 0..5 {
+        match op() {
+            Ok(v) => return Ok(v),
+            Err(rusqlite::Error::SqliteFailure(e, msg))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) =>
+            {
+                if attempt == 4 {
+                    return Err(rusqlite::Error::SqliteFailure(e, msg));
+                }
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+                delay = (delay * 2).min(160);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    unreachable!()
 }
 
 /// Parse a `filed_at` string (format "YYYY-MM-DD HH:MM:SS" or ISO) into seconds
@@ -4249,5 +4315,164 @@ mod tests {
             .unwrap();
         assert_eq!(s, "d1");
         assert_eq!(t, "d2");
+    }
+
+    #[test]
+    fn test_open_backfills_authored_at_from_filed_at() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        {
+            let db = Database::open(&path).unwrap();
+            db.add_drawer("w", "r", "backfill me", None, "test", None)
+                .unwrap();
+            db.conn
+                .execute("UPDATE drawers SET authored_at = NULL", [])
+                .unwrap();
+        }
+        let db = Database::open(&path).unwrap();
+        let n: i64 = db
+            .conn
+            .query_row(
+                "SELECT COUNT(*) FROM drawers WHERE authored_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn test_add_drawer_accepts_authored_at_override() {
+        let (_dir, db) = test_db();
+        let id = db
+            .add_drawer("w", "r", "authored override", None, "test", None)
+            .unwrap();
+        db.set_authored_at(&id, "2020-02-02 00:00:00").unwrap();
+        let at: String = db
+            .conn
+            .query_row(
+                "SELECT authored_at FROM drawers WHERE id=?1",
+                params![id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(at, "2020-02-02 00:00:00");
+    }
+
+    #[test]
+    fn test_equal_score_prefers_authored_at_over_filed_at() {
+        let (_dir, db) = test_db();
+        db.conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, filed_at, authored_at) VALUES ('old', 'w', 'old', 'tiebreak authored xyz', '2026-01-01 00:00:00', '2010-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, filed_at, authored_at) VALUES ('new', 'w', 'new', 'tiebreak authored xyz', '2020-01-01 00:00:00', '2025-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO drawers_fts(rowid, content, wing, room) SELECT rowid, content, wing, room FROM drawers",
+            [],
+        ).unwrap();
+        let r = db
+            .search(
+                "tiebreak authored",
+                5,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                "relevance",
+            )
+            .unwrap();
+        assert_eq!(r["results"][0]["room"], "new");
+    }
+
+    #[test]
+    fn test_list_drawers_since_before() {
+        let (_dir, db) = test_db();
+        db.conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES ('a', 'w', 'r', 'c', '2024-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES ('b', 'w', 'r', 'c', '2024-06-01 00:00:00')",
+            [],
+        ).unwrap();
+        db.conn.execute(
+            "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES ('c', 'w', 'r', 'c', '2025-01-01 00:00:00')",
+            [],
+        ).unwrap();
+        let r = db
+            .list_drawers_range(None, None, 10, 0, Some("2024-03-01"), Some("2024-12-01"))
+            .unwrap();
+        assert_eq!(r["total"], 1);
+        assert_eq!(r["drawers"][0]["id"], "b");
+    }
+
+    #[test]
+    fn test_busy_timeout_is_set() {
+        let (_dir, db) = test_db();
+        let timeout: i64 = db
+            .conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, 5000);
+    }
+
+    #[test]
+    fn test_with_busy_retry_retries_on_busy() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        let attempts = AtomicU32::new(0);
+        let result = with_busy_retry(|| {
+            let n = attempts.fetch_add(1, Ordering::SeqCst);
+            if n < 2 {
+                Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error {
+                        code: rusqlite::ErrorCode::DatabaseBusy,
+                        extended_code: 5,
+                    },
+                    None,
+                ))
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(result.unwrap(), 42);
+        assert_eq!(attempts.load(Ordering::SeqCst), 3);
+    }
+
+    #[test]
+    fn test_concurrent_mixed_ops() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap().to_string();
+        let db = Database::open(&path).unwrap();
+        db.add_drawer("w", "r", "concurrent seed", None, "test", None)
+            .unwrap();
+        let db_path = dir.path().join("palace.db").to_string_lossy().to_string();
+        std::thread::scope(|s| {
+            let p1 = db_path.clone();
+            let p2 = db_path.clone();
+            s.spawn(move || {
+                let c = rusqlite::Connection::open(&p1).unwrap();
+                c.busy_timeout(std::time::Duration::from_millis(5000))
+                    .unwrap();
+                let _ = c.execute(
+                    "INSERT INTO drawers (id, wing, room, content, filed_at) VALUES ('t1', 'w', 'r', 'thread write', datetime('now'))",
+                    [],
+                );
+            });
+            s.spawn(move || {
+                let c = rusqlite::Connection::open(&p2).unwrap();
+                c.busy_timeout(std::time::Duration::from_millis(5000))
+                    .unwrap();
+                let _: i64 = c
+                    .query_row("SELECT COUNT(*) FROM drawers", [], |r| r.get(0))
+                    .unwrap_or(0);
+            });
+        });
+        assert!(db.get_drawer_count() >= 1);
     }
 }

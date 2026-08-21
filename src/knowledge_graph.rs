@@ -16,6 +16,7 @@ type TripleRow = (
     Option<String>,
 );
 
+#[allow(clippy::too_many_arguments)]
 fn triple_to_json(
     subject: String,
     predicate: String,

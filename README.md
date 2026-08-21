@@ -13,7 +13,7 @@ Inspired by [milla-jovovich/mempalace](https://github.com/milla-jovovich/mempala
 - **Deterministic IDs** – content-addressed drawer IDs for deduplication
 - **Agent diary compression** – AAAK format for efficient session logging
 
-This implementation achieves **94.04% R@5** on the LongMemEval benchmark (user-turns-only), matching the original Python version while being deployable as a drop-in replacement for any MCP-compatible assistant (OpenCode, OpenCat, Claude Desktop, etc.).
+This implementation is **v3.1.0**. User-turns LongMemEval R@5 was **94.04%** before the Phase 15 ranking work (sanitizer, keyword/phrase boosts, recency tie-break). Re-run `bench/longmemeval_rust_useronly.py` when the dataset is available; we do not special-case LongMemEval question IDs.
 
 ## 🔑 Key Design Decisions
 
@@ -44,7 +44,7 @@ This mirrors the rigor of academic hybrid retrieval while staying within the sin
 - Separate tables for triples (knowledge graph) and diary entries
 
 ### 4. **MCP-First Tool Design**
-All 21 tools follow MCP conventions:
+All 44 tools follow MCP conventions:
 - Consistent JSON-RPC over stdio transport
 - Rich inputSchema validation
 - Standardized success/error response shapes
@@ -56,7 +56,7 @@ All 21 tools follow MCP conventions:
   - `relevance` (default): hybrid vector + FTS5 with Reciprocal Rank Fusion
   - `recency`: newest first, FTS5-filtered
   - `hybrid`: RRF fusion with exponential time decay boost
-  - Pagination via `offset`, date range via `filed_after`/`filed_before`
+  - Pagination via `offset`, date range via `filed_after`/`filed_before`, exact `source_file` filter, optional `max_distance`
 
 ### 6. **Incremental Session Sync**
   `mempalace_import_sessions` tracks last imported timestamp via `sync_state`
@@ -130,13 +130,15 @@ These transform MemPalace from write-only to a fully maintainable memory system.
 ```
 src/
 ├── main.rs      – Binary entry point: loads ONNX model/tokenizer, dispatches MCP
-├── mcp.rs       – MCP tool handlers (21 tools, JSON-RPC over stdio)
+├── mcp.rs       – MCP tool handlers (44 tools, JSON-RPC over stdio)
 ├── db.rs        – Core SQLite operations: drawers, FTS5, vec0, KG, graph, bulk ops
 ├── embed.rs     – ONNX inference via tract, attention-mask mean pooling
 ├── import_sessions.rs – OpenCode session import logic
 ├── import_palace.rs   – Cross-version palace importer
 ├── indexer.rs     – File system indexer with whitelist/blacklist support
-└── knowledge_graph.rs – Triple store with temporal validity
+├── hallways.rs    – Structural entity co-occurrence graph (no NLP)
+├── lock.rs        – Process writer flock
+└── knowledge_graph.rs – Triple store with temporal validity and supersede
 
 bench/
   longmemeval_rust_useronly.py – 500-question episodic memory benchmark (user turns)
@@ -271,9 +273,9 @@ DEALINGS IN THE SOFTWARE.
 ## 🧪 Testing
 
 ```sh
-cargo test --release   # 107 tests: unit + integration + graph + search + sync
+cargo test --release   # unit + integration + graph + search + sync + hallways
 cargo fmt -- --check   # code style
-cargo clippy -- -D warnings  # lint (some pre-existing warnings pending Phase 2 cleanup)
+cargo clippy -- -D warnings  # lint
 ```
 - Rust/sqlite-vec integration → [asg017/sqlite-vec](https://github.com/asg017/sqlite-vec)
 - Pure-Rust ONNX → [github.com/pelotom/ tract](https://github.com/pelotom/tract)
