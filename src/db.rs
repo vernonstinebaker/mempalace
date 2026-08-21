@@ -118,6 +118,24 @@ impl Database {
             );",
         )?;
 
+        Self::ensure_column(&self.conn, "triples", "source_file", "TEXT")?;
+        Self::ensure_column(&self.conn, "triples", "source_drawer_id", "TEXT")?;
+
+        Ok(())
+    }
+
+    fn ensure_column(conn: &Connection, table: &str, column: &str, decl: &str) -> Result<()> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let exists = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .filter_map(|r| r.ok())
+            .any(|name| name == column);
+        if !exists {
+            conn.execute(
+                &format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"),
+                [],
+            )?;
+        }
         Ok(())
     }
 

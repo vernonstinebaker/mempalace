@@ -51,8 +51,9 @@ const TOOLS_JSON: &str = concat!(
     r#"{"name":"mempalace_get_taxonomy","description":"Full taxonomy: wing \u2192 room \u2192 drawer count","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_get_aaak_spec","description":"Get the AAAK dialect specification \u2014 the compressed memory format MemPalace uses. Call this if you need to read or write AAAK-compressed memories.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_kg_query","description":"Query the knowledge graph for an entity's relationships. Returns typed facts with temporal validity. E.g. 'Max' \u2192 child_of Alice, loves chess, does swimming. Filter by date with as_of to see what was true at a point in time.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"Entity to query (e.g. 'Max', 'MyProject', 'Alice')"},"as_of":{"type":"string","description":"Date filter \u2014 only facts valid at this date (YYYY-MM-DD, optional)"},"direction":{"type":"string","description":"outgoing (entity\u2192?), incoming (?\u2192entity), or both (default: both)"}},"required":["entity"]}},"#,
-    r#"{"name":"mempalace_kg_add","description":"Add a fact to the knowledge graph. Subject \u2192 predicate \u2192 object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01'). valid_to sets an end date without needing a separate invalidate call.","inputSchema":{"type":"object","properties":{"subject":{"type":"string","description":"The entity doing/being something"},"predicate":{"type":"string","description":"The relationship type (e.g. 'loves', 'works_on', 'daughter_of')"},"object":{"type":"string","description":"The entity being connected to"},"valid_from":{"type":"string","description":"When this became true (YYYY-MM-DD, optional)"},"valid_to":{"type":"string","description":"When this stopped being true (YYYY-MM-DD, optional)"},"source_closet":{"type":"string","description":"Closet ID where this fact appears (optional)"}},"required":["subject","predicate","object"]}},"#,
+    r#"{"name":"mempalace_kg_add","description":"Add a fact to the knowledge graph. Subject \u2192 predicate \u2192 object with optional time window. E.g. ('Max', 'started_school', 'Year 7', valid_from='2026-09-01'). valid_to sets an end date without needing a separate invalidate call.","inputSchema":{"type":"object","properties":{"subject":{"type":"string","description":"The entity doing/being something"},"predicate":{"type":"string","description":"The relationship type (e.g. 'loves', 'works_on', 'daughter_of')"},"object":{"type":"string","description":"The entity being connected to"},"valid_from":{"type":"string","description":"When this became true (YYYY-MM-DD, optional)"},"valid_to":{"type":"string","description":"When this stopped being true (YYYY-MM-DD, optional)"},"source_closet":{"type":"string","description":"Closet ID where this fact appears (optional)"},"source_file":{"type":"string","description":"Source file path (optional)"},"source_drawer_id":{"type":"string","description":"Drawer this fact was mined from (optional)"}},"required":["subject","predicate","object"]}},"#,
     r#"{"name":"mempalace_kg_invalidate","description":"Mark a fact as no longer true. E.g. ankle injury resolved, job ended, moved house.","inputSchema":{"type":"object","properties":{"subject":{"type":"string","description":"Entity"},"predicate":{"type":"string","description":"Relationship"},"object":{"type":"string","description":"Connected entity"},"ended":{"type":"string","description":"When it stopped being true (YYYY-MM-DD, default: today)"}},"required":["subject","predicate","object"]}},"#,
+    r#"{"name":"mempalace_kg_supersede","description":"Atomically replace a fact: close old_object and open new_object at the same instant (half-open validity). Prefer this over invalidate+add when a value changes.","inputSchema":{"type":"object","properties":{"subject":{"type":"string"},"predicate":{"type":"string"},"old_object":{"type":"string"},"new_object":{"type":"string"},"at":{"type":"string","description":"ISO datetime of the change (default: now)"}},"required":["subject","predicate","old_object","new_object"]}},"#,
     r#"{"name":"mempalace_kg_timeline","description":"Chronological timeline of facts. Shows the story of an entity (or everything) in order.","inputSchema":{"type":"object","properties":{"entity":{"type":"string","description":"Entity to get timeline for (optional \u2014 omit for full timeline)"}}}},"#,
     r#"{"name":"mempalace_kg_stats","description":"Knowledge graph overview: entities, triples, current vs expired facts, relationship types.","inputSchema":{"type":"object","properties":{}}},"#,
     r#"{"name":"mempalace_traverse","description":"Walk the palace graph from a room. Shows connected ideas across wings \u2014 the tunnels. Like following a thread through the palace: start at 'chromadb-setup' in wing_code, discover it connects to wing_myproject (planning) and wing_user (feelings about it).","inputSchema":{"type":"object","properties":{"start_room":{"type":"string","description":"Room to start from (e.g. 'chromadb-setup', 'riley-school')"},"max_hops":{"type":"integer","description":"How many connections to follow (default: 2)"}},"required":["start_room"]}},"#,
@@ -275,6 +276,8 @@ impl<'a> Server<'a> {
                 let valid_from = validate::sanitize_iso_date(get_str(args, "valid_from"))?;
                 let valid_to = validate::sanitize_iso_date(get_str(args, "valid_to"))?;
                 let source_closet = get_str(args, "source_closet");
+                let source_file = get_str(args, "source_file");
+                let source_drawer_id = get_str(args, "source_drawer_id");
                 let triple_id = kg.add_triple(
                     subject,
                     predicate,
@@ -283,6 +286,9 @@ impl<'a> Server<'a> {
                     valid_to,
                     source_closet,
                 )?;
+                if source_file.is_some() || source_drawer_id.is_some() {
+                    kg.set_triple_provenance(&triple_id, source_file, source_drawer_id)?;
+                }
                 wal::log_write(
                     "kg_add",
                     json!({
@@ -320,6 +326,28 @@ impl<'a> Server<'a> {
                     "fact": fact_str,
                     "ended": ended.unwrap_or("today"),
                 }))?)
+            }
+
+            // ── mempalace_kg_supersede ────────────────────────────────────────
+            "mempalace_kg_supersede" => {
+                let subject = get_str(args, "subject")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: subject"))?;
+                let predicate = get_str(args, "predicate")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: predicate"))?;
+                let old_object = get_str(args, "old_object")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: old_object"))?;
+                let new_object = get_str(args, "new_object")
+                    .ok_or_else(|| anyhow::anyhow!("MissingRequiredArg: new_object"))?;
+                let at = validate::sanitize_iso_date(get_str(args, "at"))?;
+                let result = kg.supersede(subject, predicate, old_object, new_object, at)?;
+                wal::log_write(
+                    "kg_supersede",
+                    json!({
+                        "subject": subject, "predicate": predicate,
+                        "old_object": old_object, "new_object": new_object, "at": at,
+                    }),
+                );
+                Ok(serde_json::to_string(&result)?)
             }
 
             // ── mempalace_kg_timeline ─────────────────────────────────────────
@@ -860,5 +888,17 @@ fn json_value_to_id_str(val: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::String(s) => format!("\"{}\"", s.replace('"', "\\\"")),
         _ => "null".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_tools_json_contains_kg_supersede() {
+        assert!(TOOLS_JSON.contains("mempalace_kg_supersede"));
+        assert!(TOOLS_JSON.contains("old_object"));
+        assert!(TOOLS_JSON.contains("new_object"));
     }
 }

@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `phase_complete` |
-| Active phase | 16 |
-| Active task | 16.1 |
-| Last completed task | 15.8 |
+| Active phase | 17 |
+| Active task | 17.1 |
+| Last completed task | 16.4 |
 | WIP notes | — |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 165 passed (2026-08-21) |
+| Last verification | `cargo test --release` 174 passed (2026-08-21) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -323,12 +323,12 @@ values keep whole-day meaning; timestamps are exact.
 Today `query_entity` uses `valid_until >= ?2` (closed). Change to
 `valid_until IS NULL OR valid_until > ?2`.
 
-- [ ] `test_query_as_of_at_boundary_returns_only_successor` — fact A
+- [x] `test_query_as_of_at_boundary_returns_only_successor` — fact A
       `valid_until=2026-06-01`, fact B `valid_from=2026-06-01`;
       `as_of=2026-06-01` returns B only.
-- [ ] `test_query_as_of_day_before_returns_predecessor` — `as_of=2026-05-31`
+- [x] `test_query_as_of_day_before_returns_predecessor` — `as_of=2026-05-31`
       returns A only.
-- [ ] Existing `test_query_as_of` must still pass — update it if it
+- [x] Existing `test_query_as_of` must still pass — update it if it
       encoded closed-interval assumptions; do not weaken it.
 
 ### 16.2 `supersede()`
@@ -352,19 +352,19 @@ In **one transaction**:
    `valid_until = NULL`.
 3. WAL: `kg_supersede`.
 
-- [ ] `test_supersede_closes_old_and_opens_new`
-- [ ] `test_supersede_boundary_query` — `as_of=at` → new only
-- [ ] `test_supersede_missing_old_fact_errors`
-- [ ] `test_supersede_already_ended_errors`
-- [ ] `test_supersede_same_object_rejected` — old_object == new_object
+- [x] `test_supersede_closes_old_and_opens_new`
+- [x] `test_supersede_boundary_query` — `as_of=at` → new only
+- [x] `test_supersede_missing_old_fact_errors`
+- [x] `test_supersede_already_ended_errors`
+- [x] `test_supersede_same_object_rejected` — old_object == new_object
 
 ### 16.3 MCP `mempalace_kg_supersede`
 
-- [ ] Add to `TOOLS_JSON` next to other kg tools:
+- [x] Add to `TOOLS_JSON` next to other kg tools:
       required `subject`, `predicate`, `old_object`, `new_object`;
       optional `at` (ISO, via `sanitize_iso_date`).
-- [ ] Handler arm + `wal::log_write`.
-- [ ] `test_mcp_kg_supersede_roundtrip` if you can drive `execute_tool`
+- [x] Handler arm + `wal::log_write`.
+- [x] `test_mcp_kg_supersede_roundtrip` if you can drive `execute_tool`
       from tests; otherwise a db-level test plus a schema-string test
       that `TOOLS_JSON` contains `"mempalace_kg_supersede"`.
 
@@ -372,12 +372,12 @@ In **one transaction**:
 
 Python: `source_file`, `source_drawer_id` in addition to `source_closet`.
 
-- [ ] Migration: `ALTER TABLE triples ADD COLUMN source_file TEXT;`
+- [x] Migration: `ALTER TABLE triples ADD COLUMN source_file TEXT;`
       `ALTER TABLE triples ADD COLUMN source_drawer_id TEXT;`
       (guard with `PRAGMA table_info` like other optional columns, or
       `ADD COLUMN` inside a helper that ignores “duplicate column”).
-- [ ] `test_add_triple_stores_source_file_and_drawer_id`
-- [ ] MCP schema + handler pass-through. Query/timeline JSON include
+- [x] `test_add_triple_stores_source_file_and_drawer_id`
+- [x] MCP schema + handler pass-through. Query/timeline JSON include
       the fields when present.
 
 **Phase 16 done when:** 16.1–16.4 `[x]`, suite green, no search changes.
@@ -967,6 +967,13 @@ Re-run LongMemEval user-turns once (annotation must not reorder):
 R@5 ≥ 94.04% floor holds; log both scores.
 
 ---
+
+
+### 2026-08-21 — task 16.1–16.4 — KG supersede
+
+- tests added: half-open as_of, supersede close/open/errors/same-object, provenance, TOOLS_JSON
+- suite: `cargo test --release` → 174 passed
+- notes: `valid_until > as_of`; `BEGIN IMMEDIATE` supersede; ALTER triples source_file/source_drawer_id
 
 ## Parking lot
 
