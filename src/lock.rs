@@ -23,7 +23,9 @@ pub fn try_acquire(dir: &str) -> Result<WriteGuard> {
     let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
     if rc != 0 {
         return Err(anyhow!(
-            "PalaceLocked: another mempalace process holds the writer lock"
+            "PalaceLocked: another mempalace process holds the writer lock. \
+             If a resident MCP server (e.g. via llmserverplus) is running, \
+             perform writes through its mempalace_* tools, or retry when it is idle."
         ));
     }
     let _ = writeln!(file, "{}", std::process::id());
@@ -42,6 +44,26 @@ mod tests {
         let _g1 = try_acquire(path).unwrap();
         let err = try_acquire(path).unwrap_err();
         assert!(err.to_string().contains("PalaceLocked"));
+    }
+
+    #[test]
+    fn test_palace_locked_error_has_guidance() {
+        // Phase 28: the busy-lock message must tell the user what to do —
+        // a resident MCP server (llmserverplus) may legitimately hold the
+        // lock; CLI users should be pointed at the MCP tools or a retry.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().to_str().unwrap();
+        let _g = try_acquire(path).unwrap();
+        let err = try_acquire(path).unwrap_err().to_string();
+        assert!(err.contains("PalaceLocked"));
+        assert!(
+            err.contains("MCP") || err.contains("server"),
+            "guidance missing: {err}"
+        );
+        assert!(
+            err.to_lowercase().contains("retry"),
+            "retry hint missing: {err}"
+        );
     }
 
     #[test]

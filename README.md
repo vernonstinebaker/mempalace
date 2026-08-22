@@ -246,6 +246,13 @@ MEMPALACE_PALACE_PATH=~/mempalace mempalace-mcp
 ```
 
 ### Maintenance Commands
+
+> **Writer locking (Phase 28):** the process writer flock is taken **per mutating
+> operation**, not for the process lifetime — a resident MCP server (e.g. hosted
+> by llmserverplus) and CLI writers coexist. If you hit `PalaceLocked`, a write
+> is in flight: retry, or perform the write through the running server's
+> `mempalace_*` MCP tools. Reads (`search`, `--info`) never take the lock.
+
 ```sh
 # Import existing palace (original Python or Rust version)
 mempalace import-palace /path/to/old/palace.db

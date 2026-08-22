@@ -58,6 +58,8 @@ fn main() {
         }
 
         "index" => {
+            let _writer_guard = lock::try_acquire(&get_palace_dir())
+                .expect("writer lock busy: another mempalace process is writing");
             // index <directory>
             let target_dir = args.get(2).expect("Usage: mempalace index <directory>");
             let palace_dir = get_palace_dir();
@@ -70,6 +72,8 @@ fn main() {
         }
 
         "index-sessions" => {
+            let _writer_guard = lock::try_acquire(&get_palace_dir())
+                .expect("writer lock busy: another mempalace process is writing");
             // index-sessions [--source auto|opencode|codex|grok|zcode] [--db <path>] [--full]
             let source_raw = args
                 .iter()
@@ -120,6 +124,8 @@ fn main() {
         }
 
         "import-palace" => {
+            let _writer_guard = lock::try_acquire(&get_palace_dir())
+                .expect("writer lock busy: another mempalace process is writing");
             // import-palace <source_path>
             let source_path = args
                 .get(2)
@@ -133,6 +139,8 @@ fn main() {
         }
 
         "reindex" => {
+            let _writer_guard = lock::try_acquire(&get_palace_dir())
+                .expect("writer lock busy: another mempalace process is writing");
             // reindex — backfill vector embeddings for all drawers missing them
             let palace_dir = get_palace_dir();
             let db = db::Database::open(&palace_dir).expect("Failed to open database");

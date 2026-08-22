@@ -15,10 +15,15 @@ type DrawerMeta = (String, String, String, Option<String>, Option<String>);
 pub struct Database {
     pub conn: Connection,
     pub vector_disabled: bool,
-    _write_lock: crate::lock::WriteGuard,
+    /// Palace directory this connection was opened against.
+    pub dir: String,
 }
 
 impl Database {
+    /// Open a palace. Does NOT acquire the process writer flock — the lock
+    /// is taken per mutating operation (see `lock::try_acquire` and the
+    /// MCP server's `MUTATING_TOOLS`), so a resident server never starves
+    /// CLI writers. WAL + busy_timeout serialize concurrent writers.
     pub fn open(dir: &str) -> Result<Self> {
         std::fs::create_dir_all(dir)?;
         let db_path = Path::new(dir).join("palace.db");
@@ -31,12 +36,10 @@ impl Database {
         )?;
         conn.busy_timeout(std::time::Duration::from_millis(5000))?;
 
-        let write_lock = crate::lock::try_acquire(dir)?;
-
         let mut db = Self {
             conn,
             vector_disabled: false,
-            _write_lock: write_lock,
+            dir: dir.to_string(),
         };
         db.create_tables()?;
         db.probe_vec0_health();
@@ -4841,6 +4844,23 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn test_open_does_not_claim_writer_lock() {
+        // Phase 28: Database::open must not hold the process writer flock —
+        // a resident MCP server would otherwise starve CLI writers forever.
+        let dir = TempDir::new().unwrap();
+        let p = dir.path().to_str().unwrap();
+        let db1 = Database::open(p).unwrap();
+        // Another writer can acquire the lock while db1 is alive…
+        let guard = crate::lock::try_acquire(p).unwrap();
+        // …and a second Database opens fine concurrently (WAL readers/writers).
+        let db2 = Database::open(p).unwrap();
+        drop(guard);
+        // Both connections are live and usable.
+        assert!(db1.get_drawer_count() >= 0);
+        assert!(db2.get_drawer_count() >= 0);
     }
 
     #[test]

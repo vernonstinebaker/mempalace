@@ -23,12 +23,12 @@ Progress log, and git status — not chat history.
 | Field | Value |
 |-------|-------|
 | Status | `done` |
-| Active phase | *(none — 15–27 complete)* |
+| Active phase | *(none — 15–28 complete)* |
 | Active task | *(done)* |
-| Last completed task | 27.1 |
-| WIP notes | Phase 27 (CLI `search` subcommand) complete. Bonus fix found via TDD: hyphenated/punctuated FTS tokens silently zeroed FTS-only results (`read-only` parsed as column subtraction) — now quoted by `sanitize_fts_query`. Next work requires a new phase decision. |
+| Last completed task | 28.4 |
+| WIP notes | Phase 28 (per-operation writer locking) complete: `Database::open` no longer holds the flock; MCP server locks per mutating call (`MUTATING_TOOLS`, 22 tools); CLI writers take it explicitly; PalaceLocked message now guides users. CLI and resident server can coexist. |
 | Files currently dirty | — |
-| Last verification | `cargo test --release` 281 passed · fmt/clippy clean (2026-08-21) |
+| Last verification | 287 tests · fmt/clippy clean (2026-08-22) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -1139,6 +1139,74 @@ wrapper, no ranking change).
 
 ---
 
+## Phase 28 — Per-operation writer locking (fix CLI starvation)
+
+**Goal:** A resident MCP server (llmserverplus hosts one 24/7 since
+2026-08-21) permanently holds the Phase 20 writer flock, so CLI writers
+(`index-sessions`, `reindex`, `import-palace`) always fail with
+`PalaceLocked`. Move to short-lived locks: acquire around each mutating
+operation, release after. WAL + `busy_timeout` (20.1) already serialize
+concurrent writes at the SQLite level; the flock remains as a coarse
+writer-mutex, just not a lifetime one.
+
+**Files:** `src/db.rs`, `src/mcp.rs`, `src/main.rs`, `src/lock.rs`.
+
+### 28.1 Decouple the lock from `Database::open`
+
+- [x] `test_open_does_not_claim_writer_lock` — open a Database on a dir;
+      `lock::try_acquire` on the same dir still succeeds while the
+      Database is alive; open a second Database on the same dir — both
+      usable.
+- [x] Existing suite green (no behavior change beyond locking).
+
+Remove the `_write_lock` field from `Database`; `open()` no longer
+locks.
+
+### 28.2 Per-op locking in the MCP server
+
+Add `const MUTATING_TOOLS` to `mcp.rs` (add_drawer, update_drawer,
+delete_drawer, memory, checkpoint, delete_by_source, sync, mine,
+purge_expired, kg_add, kg_invalidate, kg_supersede, diary_write,
+diary_delete?, import_sessions, create_tunnel, update_tunnel?,
+delete_tunnel, create_hallway?, delete_hallway, bulk_replace, backup?,
+restore, repair, update_drawer… — enumerate from `execute_tool` arms
+that write). In `execute_tool`, acquire the guard before dispatch for
+mutating tools only; drop when the call returns.
+
+- [x] `test_mutating_tools_list_sanity` — every name in MUTATING_TOOLS
+      appears in TOOLS_JSON; known read-only tools (search, recall,
+      context, profile, status, list_*, export, get_*) are NOT listed.
+- [x] `test_mutation_releases_lock_after_call` — execute_tool
+      `mempalace_add_drawer`, then `lock::try_acquire` on the palace
+      dir succeeds (guard was dropped).
+- [x] `test_read_tool_works_while_writer_holds_lock` — hold an external
+      `try_acquire` guard; execute_tool `mempalace_search` succeeds.
+- [x] `test_mutating_tool_reports_palace_locked_when_busy` — external
+      guard held; execute_tool `mempalace_add_drawer` returns
+      `{success:false, error:"PalaceLocked…"}` (not a panic).
+
+### 28.3 CLI writers take the lock explicitly
+
+`index`, `index-sessions`, `import-palace`, `reindex` wrap their work
+in `lock::try_acquire`. `search` / `--info` stay lock-free.
+
+- [x] `test_palace_locked_error_has_guidance` — the PalaceLocked error
+      text tells the user a resident server may hold the lock and to
+      use `mempalace_*` MCP tools or retry later (assert on message
+      content from `lock::try_acquire` while a guard is held).
+
+### 28.4 Docs
+
+- [x] README + `docs` deployment note: CLI writers fail with
+      `PalaceLocked` while an MCP server is mid-write; use MCP tools or
+      retry. No ranking changes → no benchmark re-run.
+
+**Phase 28 done when:** 28.1–28.4 `[x]`, suite green, fmt/clippy clean,
+and a live test proves CLI `index-sessions` succeeds while the
+llmserverplus-hosted server is running.
+
+---
+
 ## Parking lot
 
 Not scheduled. Promote into a numbered phase only by editing this file
@@ -1318,3 +1386,12 @@ Format:
 - bug fixed: `sanitize_fts_query` left punctuated tokens bare (`read-only` → FTS5 `read - only` → "no such column: only" swallowed to 0 results on the FTS-only path). Punctuated tokens are now quoted; vector path was unaffected, which is why the MCP server masked it.
 - tool: CLI `mempalace search <query> [--limit N] [--wing W] [--room R] [--source FILE]` — read-only wrapper over `db.search_filtered`, no ranking change → no benchmark re-run required
 - phase 27 complete; PLAN status → `done`
+
+### 2026-08-22 — phase 28 — per-operation writer locking
+
+- incident: CLI `index-sessions` hit `PalaceLocked` — llmserverplus-hosted server held the lifetime flock from `Database::open`
+- tests added: open-does-not-claim-lock, MUTATING_TOOLS sanity (22 writers listed, read-only excluded), mutation-releases-lock, read-works-while-busy, mutating-reports-PalaceLocked (JSON error shape), PalaceLocked guidance message
+- suite: `cargo test --release` → 287 passed; fmt/clippy clean
+- behavior: `Database::open` lock-free; `execute_tool` acquires the flock only for MUTATING_TOOLS and returns `{success:false,error:"PalaceLocked…"}` when busy; CLI writers (`index`, `index-sessions`, `import-palace`, `reindex`) take it explicitly; `search`/`--info` lock-free
+- no ranking changes → no benchmark re-run required
+- phase 28 complete; PLAN status → `done`

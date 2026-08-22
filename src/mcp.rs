@@ -107,11 +107,38 @@ pub struct Server<'a> {
     embedder: Option<Embedder>,
 }
 
+/// Tools that mutate the palace. The process writer flock is acquired for
+/// the duration of these calls only (Phase 28), so a resident server never
+/// starves CLI writers and vice versa. Everything else is read-only.
+pub(crate) const MUTATING_TOOLS: &[&str] = &[
+    "mempalace_add_drawer",
+    "mempalace_backup",
+    "mempalace_bulk_replace",
+    "mempalace_checkpoint",
+    "mempalace_create_tunnel",
+    "mempalace_delete_by_source",
+    "mempalace_delete_drawer",
+    "mempalace_delete_hallway",
+    "mempalace_delete_tunnel",
+    "mempalace_diary_write",
+    "mempalace_import_sessions",
+    "mempalace_kg_add",
+    "mempalace_kg_invalidate",
+    "mempalace_kg_supersede",
+    "mempalace_memory",
+    "mempalace_mine",
+    "mempalace_purge_expired",
+    "mempalace_reconnect",
+    "mempalace_repair",
+    "mempalace_restore",
+    "mempalace_sync",
+    "mempalace_update_drawer",
+];
+
 impl<'a> Server<'a> {
     pub fn new(db: &'a Database, embedder: Option<Embedder>) -> Self {
         Self { db, embedder }
     }
-
     pub fn run_stdio(&self) {
         let stdin = std::io::stdin();
         let stdout = std::io::stdout();
@@ -209,6 +236,19 @@ impl<'a> Server<'a> {
 
     pub(crate) fn execute_tool(&self, name: &str, args: &Value) -> anyhow::Result<String> {
         let kg = KnowledgeGraph::new(self.db);
+
+        // Phase 28: writer lock is held only for the duration of a mutating
+        // call, so resident servers never starve CLI writers (and vice versa).
+        let _writer = if MUTATING_TOOLS.contains(&name) {
+            match crate::lock::try_acquire(&self.db.dir) {
+                Ok(g) => Some(g),
+                Err(e) => {
+                    return Ok(json!({"success": false, "error": e.to_string()}).to_string());
+                }
+            }
+        } else {
+            None
+        };
 
         match name {
             // ── mempalace_status ─────────────────────────────────────────────
@@ -1267,6 +1307,89 @@ mod tests {
         assert!(TOOLS_JSON.contains("\"mempalace_profile\""));
         assert!(TOOLS_JSON.contains("dynamic_limit"));
         assert!(TOOLS_JSON.contains("\"mempalace_context\""));
+    }
+
+    // ── Phase 28: per-operation writer locking ─────────────────────────────────
+
+    #[test]
+    fn test_mutating_tools_list_sanity() {
+        for name in MUTATING_TOOLS {
+            assert!(
+                TOOLS_JSON.contains(&format!("\"{name}\"")),
+                "MUTATING_TOOLS contains unknown tool {name}"
+            );
+        }
+        // Read-only tools must never be listed.
+        for ro in [
+            "mempalace_search",
+            "mempalace_recall",
+            "mempalace_context",
+            "mempalace_profile",
+            "mempalace_status",
+            "mempalace_list_drawers",
+            "mempalace_export",
+            "mempalace_get_drawer",
+        ] {
+            assert!(
+                !MUTATING_TOOLS.contains(&ro),
+                "{ro} is read-only but listed as mutating"
+            );
+        }
+    }
+
+    #[test]
+    fn test_mutation_releases_lock_after_call() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().to_str().unwrap();
+        let db = Database::open(p).unwrap();
+        let server = Server::new(&db, None);
+        let raw = server
+            .execute_tool(
+                "mempalace_add_drawer",
+                &json!({"wing": "w", "room": "r", "content": "lock release check"}),
+            )
+            .unwrap();
+        assert!(raw.contains("\"success\":true"));
+        // The guard must be dropped once the call returns.
+        crate::lock::try_acquire(p).expect("writer lock should be free after mutation");
+    }
+
+    #[test]
+    fn test_read_tool_works_while_writer_holds_lock() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().to_str().unwrap();
+        let db = Database::open(p).unwrap();
+        let server = Server::new(&db, None);
+        // Someone else (CLI writer) holds the lock…
+        let _external = crate::lock::try_acquire(p).unwrap();
+        // …but reads never take the writer lock.
+        let raw = server
+            .execute_tool("mempalace_search", &json!({"query": "anything"}))
+            .unwrap();
+        assert!(raw.contains("\"results\""), "search should answer normally");
+        assert!(
+            !raw.contains("PalaceLocked"),
+            "reads must not hit the writer lock"
+        );
+    }
+
+    #[test]
+    fn test_mutating_tool_reports_palace_locked_when_busy() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let p = dir.path().to_str().unwrap();
+        let db = Database::open(p).unwrap();
+        let server = Server::new(&db, None);
+        let _external = crate::lock::try_acquire(p).unwrap();
+        let raw = server
+            .execute_tool(
+                "mempalace_add_drawer",
+                &json!({"wing": "w", "room": "r", "content": "should fail cleanly"}),
+            )
+            .unwrap();
+        let v: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(v["success"], json!(false));
+        let err = v["error"].as_str().unwrap_or_default();
+        assert!(err.contains("PalaceLocked"), "got: {err}");
     }
 
     #[test]
