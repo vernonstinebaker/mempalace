@@ -25,10 +25,10 @@ Progress log, and git status — not chat history.
 | Status | `done` |
 | Active phase | *(none — 15–28 complete)* |
 | Active task | *(done)* |
-| Last completed task | 28.4 |
-| WIP notes | Phase 28 (per-operation writer locking) complete: `Database::open` no longer holds the flock; MCP server locks per mutating call (`MUTATING_TOOLS`, 22 tools); CLI writers take it explicitly; PalaceLocked message now guides users. CLI and resident server can coexist. |
+| Last completed task | 28.5 (CLI help / unknown-arg fail-fast) |
+| WIP notes | Phase 28 (per-operation writer locking) complete: `Database::open` no longer holds the flock; MCP server locks per mutating call (`MUTATING_TOOLS`, 22 tools); CLI writers take it explicitly; PalaceLocked message now guides users. CLI and resident server can coexist. Phase 28.5: `main` now dispatches through a pure `parse_command() -> Cli`; `-h/--help/-help/help` and `-V/--version` exit 0, unknown subcommand/flag exits 2 with usage on stderr, and only *no* subcommand starts stdio. |
 | Files currently dirty | — |
-| Last verification | 287 tests · fmt/clippy clean (2026-08-22) |
+| Last verification | 293 tests + 3 CLI integration (296) · fmt/clippy clean (2026-11-02) |
 | Blockers | none |
 
 **Status values:** `not_started` · `in_progress` · `blocked` · `phase_complete` · `done`
@@ -1395,3 +1395,12 @@ Format:
 - behavior: `Database::open` lock-free; `execute_tool` acquires the flock only for MUTATING_TOOLS and returns `{success:false,error:"PalaceLocked…"}` when busy; CLI writers (`index`, `index-sessions`, `import-palace`, `reindex`) take it explicitly; `search`/`--info` lock-free
 - no ranking changes → no benchmark re-run required
 - phase 28 complete; PLAN status → `done`
+
+### 2026-11-02 — phase 28.5 — CLI help / fail-fast on unknown args
+
+- symptom: `mempalace-mcp -help` printed the embed log then sat on stdin — `-help` matched no arm and fell into the `_ =>` stdio-server branch; any typo did the same
+- tests added (red first): `parse_command` help/version aliases, serve-only-with-no-subcommand, known subcommands, typo rejection (4 cases), `usage()` covers every command + default mode; `tests/cli.rs` process guards for `-h/--help/-help/help` exit 0, `--version` exit 0, `serch` exit 2 with stderr usage and empty stdout (stdin `/dev/null` so a regression cannot hang CI)
+- implementation: `enum Cli` + pure `parse_command(&[String])`; `main` matches the enum instead of raw strings; server path is reachable only via `Cli::Serve` (empty `argv[1]`)
+- suite: `cargo test --release` → 293 unit + 3 integration = 296 passed; `cargo fmt -- --check` and `cargo clippy --release -- -D warnings` clean
+- no ranking / schema / tool changes → no benchmark re-run required
+- redeployed: `make install` → `/Users/vds/bin/mempalace-mcp` v3.1.0; restart hosted MCP clients to pick up the new exec

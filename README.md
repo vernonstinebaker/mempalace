@@ -226,6 +226,7 @@ cd mempalace
 unset CARGO_TARGET_DIR   # IDEs/sandboxes may redirect cargo output
 make install             # cargo build --release && cp to ~/bin/mempalace-mcp
 mempalace-mcp --info     # expect: MemPalace v3.1.0 (Rust)
+mempalace-mcp --help     # list subcommands (or -h / -help)
 
 # Alternative: copy into a directory already on PATH
 # sudo cp target/release/mempalace-mcp /usr/local/bin/
@@ -244,6 +245,17 @@ MEMPALACE_PALACE_PATH=~/mempalace mempalace-mcp --info
 # stdio transport (used by OpenCode/OpenCat)
 MEMPALACE_PALACE_PATH=~/mempalace mempalace-mcp
 ```
+
+### Help & Version
+```sh
+mempalace-mcp --help      # aliases: -h, -help, help
+mempalace-mcp --version   # alias: -V
+```
+
+With no subcommand the binary is the MCP stdio server. Anything else that is
+not a known subcommand (a typo like `serch` or `--helo`) **exits with code 2**
+and prints usage to stderr — it no longer falls through to the stdio server and
+appears to hang on a terminal.
 
 ### Maintenance Commands
 

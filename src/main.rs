@@ -38,17 +38,97 @@ fn get_palace_dir() -> String {
     })
 }
 
+/// What the process should do, derived from `argv[1]`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Cli {
+    Serve,
+    Help,
+    Version,
+    Info,
+    Index,
+    IndexSessions,
+    Search,
+    ImportPalace,
+    Reindex,
+}
+
+/// Map `argv` to a CLI action.
+///
+/// `Serve` is returned only when no subcommand is given. Any unknown flag or
+/// command is an error, so a typo can never silently start the stdio server
+/// and look like a hang.
+fn parse_command(args: &[String]) -> Result<Cli, String> {
+    let subcommand = args.get(1).map(String::as_str).unwrap_or("");
+    let cli = match subcommand {
+        "" => Cli::Serve,
+        "-h" | "--help" | "-help" | "help" => Cli::Help,
+        "-V" | "--version" => Cli::Version,
+        "--info" | "info" => Cli::Info,
+        "index" => Cli::Index,
+        "index-sessions" => Cli::IndexSessions,
+        "search" => Cli::Search,
+        "import-palace" => Cli::ImportPalace,
+        "reindex" => Cli::Reindex,
+        other if other.starts_with('-') => return Err(format!("unknown option: {other}")),
+        other => return Err(format!("unknown command: {other}")),
+    };
+    Ok(cli)
+}
+
+fn usage() -> String {
+    "\
+MemPalace — local memory palace for agents (MCP stdio server + CLI)
+
+Usage:
+  mempalace-mcp
+      Run the MCP stdio server (default when no subcommand is given).
+
+  mempalace-mcp <command> [options]
+
+Commands:
+  info                  Show palace path and drawer count (alias: --info)
+  search <query>        Hybrid search from the terminal
+                        [--limit N] [--wing W] [--room R] [--source FILE]
+  index <directory>     Index a directory into the palace
+  index-sessions        Import coding-session transcripts
+                        [--source auto|opencode|codex|grok|zcode]
+                        [--db <path>] [--full]
+  import-palace <db>    Import an existing palace database
+  reindex               Backfill missing vector embeddings
+
+Options:
+  -h, -help, --help     Show this help and exit
+  -V, --version         Show version and exit
+
+Environment:
+  MEMPALACE_PALACE_PATH Palace directory
+                        (default: $HOME/.local/share/mempalace)
+"
+    .to_string()
+}
+
 fn main() {
     // Register sqlite-vec BEFORE any connection is opened
     register_sqlite_vec();
 
     let args: Vec<String> = std::env::args().collect();
 
-    // Parse subcommand
-    let subcommand = args.get(1).map(|s| s.as_str()).unwrap_or("");
+    let command = match parse_command(&args) {
+        Ok(command) => command,
+        Err(message) => {
+            eprintln!("mempalace-mcp: {message}");
+            eprintln!();
+            eprint!("{}", usage());
+            std::process::exit(2);
+        }
+    };
 
-    match subcommand {
-        "--info" | "info" => {
+    match command {
+        Cli::Help => print!("{}", usage()),
+
+        Cli::Version => println!("mempalace-mcp {}", env!("CARGO_PKG_VERSION")),
+
+        Cli::Info => {
             let dir = get_palace_dir();
             let db = db::Database::open(&dir).expect("Failed to open database");
             let count = db.get_drawer_count();
@@ -57,7 +137,7 @@ fn main() {
             println!("Total drawers: {count}");
         }
 
-        "index" => {
+        Cli::Index => {
             let _writer_guard = lock::try_acquire(&get_palace_dir())
                 .expect("writer lock busy: another mempalace process is writing");
             // index <directory>
@@ -71,7 +151,7 @@ fn main() {
             println!("Indexed {count} files");
         }
 
-        "index-sessions" => {
+        Cli::IndexSessions => {
             let _writer_guard = lock::try_acquire(&get_palace_dir())
                 .expect("writer lock busy: another mempalace process is writing");
             // index-sessions [--source auto|opencode|codex|grok|zcode] [--db <path>] [--full]
@@ -111,7 +191,7 @@ fn main() {
             }
         }
 
-        "search" => {
+        Cli::Search => {
             // search <query> [--limit N] [--wing W] [--room R] [--source FILE]
             let opts = parse_search_args(&args[2..]).unwrap_or_else(|e| {
                 eprintln!("{e}");
@@ -123,7 +203,7 @@ fn main() {
             run_search(&db, &opts, embedder.as_ref()).expect("Search failed");
         }
 
-        "import-palace" => {
+        Cli::ImportPalace => {
             let _writer_guard = lock::try_acquire(&get_palace_dir())
                 .expect("writer lock busy: another mempalace process is writing");
             // import-palace <source_path>
@@ -138,7 +218,7 @@ fn main() {
             println!("Imported {drawers} drawers, {triples} triples");
         }
 
-        "reindex" => {
+        Cli::Reindex => {
             let _writer_guard = lock::try_acquire(&get_palace_dir())
                 .expect("writer lock busy: another mempalace process is writing");
             // reindex — backfill vector embeddings for all drawers missing them
@@ -159,7 +239,7 @@ fn main() {
         }
 
         // Default: MCP stdio server
-        _ => {
+        Cli::Serve => {
             let palace_dir = get_palace_dir();
             let db = db::Database::open(&palace_dir).expect("Failed to open database");
             let embedder = embed::try_load_embedder();
@@ -295,6 +375,85 @@ mod tests {
         v.to_string()
     }
 
+    /// Full argv, including argv[0], with `args[1..]` supplied by the test.
+    fn argv(args: &[&str]) -> Vec<String> {
+        std::iter::once(s("mempalace-mcp"))
+            .chain(args.iter().map(|a| s(a)))
+            .collect()
+    }
+
+    #[test]
+    fn test_parse_command_help_aliases() {
+        for flag in ["-h", "--help", "-help", "help"] {
+            assert_eq!(
+                parse_command(&argv(&[flag])),
+                Ok(Cli::Help),
+                "{flag} must print help"
+            );
+        }
+    }
+
+    #[test]
+    fn test_parse_command_version_aliases() {
+        for flag in ["-V", "--version"] {
+            assert_eq!(parse_command(&argv(&[flag])), Ok(Cli::Version));
+        }
+    }
+
+    #[test]
+    fn test_parse_command_serves_only_with_no_subcommand() {
+        assert_eq!(parse_command(&argv(&[])), Ok(Cli::Serve));
+    }
+
+    #[test]
+    fn test_parse_command_known_subcommands() {
+        let cases = [
+            ("info", Cli::Info),
+            ("--info", Cli::Info),
+            ("index", Cli::Index),
+            ("index-sessions", Cli::IndexSessions),
+            ("search", Cli::Search),
+            ("import-palace", Cli::ImportPalace),
+            ("reindex", Cli::Reindex),
+        ];
+        for (flag, expected) in cases {
+            assert_eq!(parse_command(&argv(&[flag])), Ok(expected), "{flag}");
+        }
+    }
+
+    #[test]
+    fn test_parse_command_rejects_typos_instead_of_serving() {
+        // A mistyped flag or subcommand must error, never fall through to the
+        // stdio server (that is what made `mempalace-mcp -help` look hung).
+        for bad in ["--helo", "-help-me", "serch", "Reindex"] {
+            let err = parse_command(&argv(&[bad])).expect_err("typo must not start the server");
+            assert!(err.contains(bad), "error should name the bad token: {err}");
+        }
+    }
+
+    #[test]
+    fn test_usage_lists_every_subcommand_and_default_mode() {
+        let usage = usage();
+        for word in [
+            "Usage:",
+            "info",
+            "search",
+            "index",
+            "index-sessions",
+            "import-palace",
+            "reindex",
+            "help",
+            "--version",
+            "MEMPALACE_PALACE_PATH",
+        ] {
+            assert!(usage.contains(word), "usage is missing {word:?}:\n{usage}");
+        }
+        assert!(
+            usage.contains("MCP stdio server"),
+            "usage must explain the no-argument default"
+        );
+    }
+
     #[test]
     fn test_cli_search_flag_parsing() {
         let args = vec![
@@ -412,7 +571,7 @@ mod tests {
         let target_pos = out
             .find("zcode adapter")
             .unwrap_or_else(|| panic!("no target hit; raw result: {result}"));
-        let other_pos = out.find("gardening").map(|p| p).unwrap_or(usize::MAX);
+        let other_pos = out.find("gardening").unwrap_or(usize::MAX);
         assert!(target_pos < other_pos || other_pos == usize::MAX);
         assert!(out.contains("w/target"));
     }
