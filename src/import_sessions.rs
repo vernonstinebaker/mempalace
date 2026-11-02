@@ -1247,9 +1247,7 @@ mod tests {
         );
         write_index(
             home,
-            &[format!(
-                r#"{{"id":"11111111-2222-3333-4444-555555555555","thread_name":"Fix login bug","updated_at":"2026-08-01T10:05:00.000000Z"}}"#
-            )],
+            &[r#"{"id":"11111111-2222-3333-4444-555555555555","thread_name":"Fix login bug","updated_at":"2026-08-01T10:05:00.000000Z"}"#.to_string()],
         );
 
         let sessions = collect_codex_sessions(home).unwrap();
@@ -1699,16 +1697,16 @@ mod tests {
         };
         SourcePaths {
             opencode_db,
-            codex_home: PathBuf::from(if with_stores.contains(&"codex") {
+            codex_home: if with_stores.contains(&"codex") {
                 root.join("codex")
             } else {
                 root.join("no-codex")
-            }),
-            grok_home: PathBuf::from(if with_stores.contains(&"grok") {
+            },
+            grok_home: if with_stores.contains(&"grok") {
                 root.join("grok")
             } else {
                 root.join("no-grok")
-            }),
+            },
             zcode_db,
         }
     }
